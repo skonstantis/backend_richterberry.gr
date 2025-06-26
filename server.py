@@ -11,7 +11,7 @@ connected_clients = set()
 logging.basicConfig(
     format='[%(asctime)s] %(levelname)s: %(message)s',
     datefmt='%H:%M:%S',
-    level=logging.INFO
+    level=logging.DEBUG  # DEBUG so we can see raw message and parsed data
 )
 
 async def handle_client(ws):
@@ -34,8 +34,15 @@ async def handle_client(ws):
                 logging.error(f"Unexpected disconnect from {client_ip}: {e}")
                 break
 
+            # Log the raw message
+            logging.debug(f"Raw message from {client_ip}: {message}")
+
             try:
                 data = json.loads(message)
+
+                # Log the full parsed JSON
+                logging.info(f"Full JSON data from {client_ip}: {data}")
+
                 station_id = data.get("station_id", "UNKNOWN")
                 samples = data.get("samples", [])
                 ts_start = data.get("timestamp_start")  # ISO8601 string or None
@@ -45,12 +52,12 @@ async def handle_client(ws):
 
                 logging.info(
                     f"Station {station_id} | samples: {len(samples)} | "
-                    f"timestamp_start: {ts_start or 'None'} | "
-                    f"gps_synced: {gps_synced} | sample_rate: {sample_rate} | max_jitter_ms: {max_jitter}"
+                    f"timestamp_start: {ts_start or 'None'} | gps_synced: {gps_synced} | "
+                    f"sample_rate: {sample_rate} | max_jitter_ms: {max_jitter}"
                 )
 
             except json.JSONDecodeError:
-                logging.warning(f"Invalid JSON from {client_ip}")
+                logging.warning(f"Invalid JSON from {client_ip}: {message}")
 
     except Exception as e:
         logging.error(f"Unexpected error with connection from {client_ip}: {e}")
