@@ -81,7 +81,7 @@ ssl_context.load_cert_chain(
     keyfile="/etc/letsencrypt/live/seismologos.shop/privkey.pem"
 )
 
-async def handler(websocket, path):
+async def handler(websocket):
     print("Client connected")
     async for message in websocket:
         print(f"Received: {message}")
