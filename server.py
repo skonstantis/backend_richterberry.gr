@@ -1,9 +1,18 @@
 import asyncio
 import ssl
 import websockets
+from websockets.server import WebSocketServerProtocol
 
-# Connected user clients
 user_clients = set()
+
+class ServerProtocol(WebSocketServerProtocol):
+    def __init__(self, *args, **kwargs):
+        self.request_path = None
+        super().__init__(*args, **kwargs)
+
+    async def process_request(self, path, request_headers):
+        self.request_path = path
+        return None  # accept connection
 
 async def station_handler(websocket):
     print("[Station] Connected")
@@ -19,7 +28,7 @@ async def user_handler(websocket):
     user_clients.add(websocket)
     try:
         async for _ in websocket:
-            pass  # Users don't send anything
+            pass
     except websockets.exceptions.ConnectionClosed:
         print("[User] Disconnected")
     finally:
@@ -34,9 +43,8 @@ async def broadcast_to_users(data):
             disconnected.add(user)
     user_clients.difference_update(disconnected)
 
-async def main_handler(websocket):
-    path = websocket.path  
-
+async def main_handler(websocket: WebSocketServerProtocol):
+    path = websocket.request_path
     if path == "/ws/station":
         await station_handler(websocket)
     elif path == "/ws/user":
@@ -47,13 +55,16 @@ async def main_handler(websocket):
 
 async def main():
     ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ssl_context.load_cert_chain(
-        certfile="/etc/letsencrypt/live/seismologos.shop/fullchain.pem",
-        keyfile="/etc/letsencrypt/live/seismologos.shop/privkey.pem"
-    )
+    ssl_context.load_cert_chain(certfile="/path/to/fullchain.pem", keyfile="/path/to/privkey.pem")
 
-    server = await websockets.serve(main_handler, "0.0.0.0", 443, ssl=ssl_context)
-    print("Secure WebSocket server listening on port 443...")
+    server = await websockets.serve(
+        main_handler,
+        "0.0.0.0",
+        443,
+        ssl=ssl_context,
+        create_protocol=ServerProtocol
+    )
+    print("WebSocket server listening on port 443...")
     await server.wait_closed()
 
 if __name__ == "__main__":
