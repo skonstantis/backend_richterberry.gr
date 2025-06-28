@@ -1,8 +1,8 @@
 import asyncio
 import websockets
 
-async def handler(websocket, path):
-    print(f"Client connected: {websocket.remote_address}")
+async def handler(websocket):
+    print(f"New connection from {websocket.remote_address}")
     try:
         async for message in websocket:
             print(f"Received: {message}")
