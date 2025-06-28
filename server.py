@@ -2,17 +2,17 @@ import asyncio
 import websockets
 
 async def handler(websocket, path):
-    if path == "/ws/station":
+    print(f"Client connected: {websocket.remote_address}")
+    try:
         async for message in websocket:
             print(f"Received: {message}")
             await websocket.send(f"Echo: {message}")
-    else:
-        # Close connection for other paths
-        await websocket.close()
+    except websockets.exceptions.ConnectionClosed:
+        print("Client disconnected")
 
 async def main():
-    async with websockets.serve(handler, "0.0.0.0", 5000):
-        print("WebSocket server listening on ws://0.0.0.0:5000/ws/station")
+    async with websockets.serve(handler, "127.0.0.1", 8765):
+        print("WebSocket server running on ws://127.0.0.1:8765")
         await asyncio.Future()  # run forever
 
 if __name__ == "__main__":
