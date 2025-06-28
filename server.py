@@ -4,17 +4,19 @@ import websockets
 async def handler(websocket, path):
     if path == "/ws/station":
         async for message in websocket:
-            print("Received:", message)
-            await websocket.send("Echo: " + message)
+            print(f"Received: {message}")
+            await websocket.send(f"Echo: {message}")
     else:
-        # Close connection if path does not match
-        await websocket.close(code=1008, reason="Invalid path")
+        # Close connection for other paths
+        await websocket.close()
 
-start_server = websockets.serve(handler, "localhost", 5000)
+async def main():
+    async with websockets.serve(handler, "0.0.0.0", 5000):
+        print("WebSocket server listening on ws://0.0.0.0:5000/ws/station")
+        await asyncio.Future()  # run forever
 
-asyncio.get_event_loop().run_until_complete(start_server)
-print("WebSocket server running on ws://localhost:5000/ws/station")
-asyncio.get_event_loop().run_forever()
+if __name__ == "__main__":
+    asyncio.run(main())
 
 # import asyncio
 # import ssl
