@@ -1,8 +1,12 @@
 import asyncio
 import ssl
 import websockets
+from websockets.server import WebSocketServerProtocol
 
 user_clients = set()
+
+class MyProtocol(WebSocketServerProtocol):
+    pass  # no special override needed here
 
 async def station_handler(websocket):
     print("[Station] Connected")
@@ -24,15 +28,15 @@ async def user_handler(websocket):
     user_clients.add(websocket)
     try:
         async for _ in websocket:
-            pass  # users don't send messages
+            pass
     except websockets.ConnectionClosed:
         print("[User] Disconnected")
     finally:
         user_clients.remove(websocket)
 
-async def handler(websocket):
-    path = websocket.raw_request_path
-
+async def handler(websocket: MyProtocol):
+    path = websocket.path  # <- This works because we use WebSocketServerProtocol subclass
+    print(f"New connection on path: {path}")
     if path == "/ws/station":
         await station_handler(websocket)
     elif path == "/ws/user":
@@ -53,6 +57,7 @@ async def main():
         host="0.0.0.0",
         port=443,
         ssl=ssl_context,
+        create_protocol=MyProtocol,  # important!
     ):
         print("WebSocket server started on wss://0.0.0.0:443")
         await asyncio.Future()  # run forever
