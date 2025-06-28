@@ -1,65 +1,28 @@
 import asyncio
-import ssl
 import websockets
-from websockets.server import WebSocketServerProtocol
 
-user_clients = set()
+# Path your clients will connect to
+PATH = "/ws/station"
 
-class MyProtocol(WebSocketServerProtocol):
-    pass  # no special override needed here
-
-async def station_handler(websocket):
-    print("[Station] Connected")
+async def handler(websocket, path):
+    if path != PATH:
+        # Reject connections to other paths
+        await websocket.close(code=1008, reason="Invalid path")
+        return
+    
+    print(f"Client connected: {websocket.remote_address}")
     try:
         async for message in websocket:
-            print(f"[Station] Received: {message}")
-            disconnected = set()
-            for user in user_clients:
-                try:
-                    await user.send(message)
-                except websockets.ConnectionClosed:
-                    disconnected.add(user)
-            user_clients.difference_update(disconnected)
-    except websockets.ConnectionClosed:
-        print("[Station] Disconnected")
-
-async def user_handler(websocket):
-    print("[User] Connected")
-    user_clients.add(websocket)
-    try:
-        async for _ in websocket:
-            pass
-    except websockets.ConnectionClosed:
-        print("[User] Disconnected")
-    finally:
-        user_clients.remove(websocket)
-
-async def handler(websocket: MyProtocol):
-    path = websocket.path  # <- This works because we use WebSocketServerProtocol subclass
-    print(f"New connection on path: {path}")
-    if path == "/ws/station":
-        await station_handler(websocket)
-    elif path == "/ws/user":
-        await user_handler(websocket)
-    else:
-        print(f"[Server] Unknown path: {path}")
-        await websocket.close()
-
-ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-ssl_context.load_cert_chain(
-    certfile="/etc/letsencrypt/live/seismologos.shop/fullchain.pem",
-    keyfile="/etc/letsencrypt/live/seismologos.shop/privkey.pem"
-)
+            print(f"Received: {message}")
+            response = f"Echo: {message}"
+            await websocket.send(response)
+    except websockets.exceptions.ConnectionClosed as e:
+        print(f"Connection closed: {e}")
 
 async def main():
-    async with websockets.serve(
-        handler,
-        host="0.0.0.0",
-        port=443,
-        ssl=ssl_context,
-        create_protocol=MyProtocol,  # important!
-    ):
-        print("WebSocket server started on wss://0.0.0.0:443")
+    # Listen only on localhost because nginx reverse proxy will forward external requests
+    async with websockets.serve(handler, "127.0.0.1", 5000):
+        print("WebSocket server listening on ws://127.0.0.1:5000")
         await asyncio.Future()  # run forever
 
 if __name__ == "__main__":
