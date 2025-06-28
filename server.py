@@ -31,7 +31,7 @@ async def user_handler(websocket):
         user_clients.remove(websocket)
 
 async def handler(websocket):
-    path = websocket.path
+    path = websocket.raw_request_path
 
     if path == "/ws/station":
         await station_handler(websocket)
