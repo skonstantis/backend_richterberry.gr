@@ -1,4 +1,5 @@
 import asyncio
+import ssl
 import websockets
 
 # Connected user clients
@@ -43,12 +44,19 @@ async def main_handler(websocket, path):
         await websocket.close()
 
 async def main():
-    server = await websockets.serve(main_handler, "0.0.0.0", 8765)
-    print("WebSocket server listening on port 8765...")
+    ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ssl_context.load_cert_chain(
+        certfile="/etc/letsencrypt/live/seismologos.shop/fullchain.pem",
+        keyfile="/etc/letsencrypt/live/seismologos.shop/privkey.pem"
+    )
+
+    server = await websockets.serve(main_handler, "0.0.0.0", 443, ssl=ssl_context)
+    print("Secure WebSocket server listening on port 443...")
     await server.wait_closed()
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 # import asyncio
 # import ssl
 # import websockets
