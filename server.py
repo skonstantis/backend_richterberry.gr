@@ -55,7 +55,10 @@ async def main_handler(websocket: WebSocketServerProtocol):
 
 async def main():
     ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ssl_context.load_cert_chain(certfile="/path/to/fullchain.pem", keyfile="/path/to/privkey.pem")
+    ssl_context.load_cert_chain(
+        certfile="/etc/letsencrypt/live/seismologos.shop/fullchain.pem",
+        keyfile="/etc/letsencrypt/live/seismologos.shop/privkey.pem"
+    )
 
     server = await websockets.serve(
         main_handler,
