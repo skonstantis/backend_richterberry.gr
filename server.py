@@ -34,7 +34,9 @@ async def broadcast_to_users(data):
             disconnected.add(user)
     user_clients.difference_update(disconnected)
 
-async def main_handler(websocket, path):
+async def main_handler(websocket):
+    path = websocket.path  
+
     if path == "/ws/station":
         await station_handler(websocket)
     elif path == "/ws/user":
