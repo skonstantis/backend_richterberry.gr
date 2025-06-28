@@ -47,7 +47,7 @@ ssl_context.load_cert_chain(
 
 async def main():
     async with websockets.serve(
-        ws_handler=handler,
+        handler,
         host="0.0.0.0",
         port=443,
         ssl=ssl_context,
