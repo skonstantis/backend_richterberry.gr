@@ -1,26 +1,22 @@
 import asyncio
 import ssl
 import websockets
-from websockets.server import WebSocketServerProtocol
 
 user_clients = set()
-
-class ServerProtocol(WebSocketServerProtocol):
-    def __init__(self, *args, **kwargs):
-        self.request_path = None
-        super().__init__(*args, **kwargs)
-
-    async def process_request(self, path, request_headers):
-        self.request_path = path
-        return None  # accept connection
 
 async def station_handler(websocket):
     print("[Station] Connected")
     try:
         async for message in websocket:
             print(f"[Station] Received: {message}")
-            await broadcast_to_users(message)
-    except websockets.exceptions.ConnectionClosed:
+            disconnected = set()
+            for user in user_clients:
+                try:
+                    await user.send(message)
+                except websockets.ConnectionClosed:
+                    disconnected.add(user)
+            user_clients.difference_update(disconnected)
+    except websockets.ConnectionClosed:
         print("[Station] Disconnected")
 
 async def user_handler(websocket):
@@ -28,23 +24,13 @@ async def user_handler(websocket):
     user_clients.add(websocket)
     try:
         async for _ in websocket:
-            pass
-    except websockets.exceptions.ConnectionClosed:
+            pass  # users don't send messages
+    except websockets.ConnectionClosed:
         print("[User] Disconnected")
     finally:
         user_clients.remove(websocket)
 
-async def broadcast_to_users(data):
-    disconnected = set()
-    for user in user_clients:
-        try:
-            await user.send(data)
-        except websockets.exceptions.ConnectionClosed:
-            disconnected.add(user)
-    user_clients.difference_update(disconnected)
-
-async def main_handler(websocket: WebSocketServerProtocol):
-    path = websocket.request_path
+async def handler(websocket, path):
     if path == "/ws/station":
         await station_handler(websocket)
     elif path == "/ws/user":
@@ -53,22 +39,21 @@ async def main_handler(websocket: WebSocketServerProtocol):
         print(f"[Server] Unknown path: {path}")
         await websocket.close()
 
-async def main():
-    ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ssl_context.load_cert_chain(
-        certfile="/etc/letsencrypt/live/seismologos.shop/fullchain.pem",
-        keyfile="/etc/letsencrypt/live/seismologos.shop/privkey.pem"
-    )
+ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+ssl_context.load_cert_chain(
+    certfile="/etc/letsencrypt/live/seismologos.shop/fullchain.pem",
+    keyfile="/etc/letsencrypt/live/seismologos.shop/privkey.pem"
+)
 
-    server = await websockets.serve(
-        main_handler,
-        "0.0.0.0",
-        443,
+async def main():
+    async with websockets.serve(
+        ws_handler=handler,
+        host="0.0.0.0",
+        port=443,
         ssl=ssl_context,
-        create_protocol=ServerProtocol
-    )
-    print("WebSocket server listening on port 443...")
-    await server.wait_closed()
+    ):
+        print("WebSocket server started on wss://0.0.0.0:443")
+        await asyncio.Future()  # run forever
 
 if __name__ == "__main__":
     asyncio.run(main())
