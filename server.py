@@ -85,10 +85,14 @@ async def handler(websocket, path):
     print("Client connected")
     async for message in websocket:
         print(f"Received: {message}")
-        await websocket.send(f"Echo: {message}")
+        await websocket.send("Echo: " + message)
 
-start_server = websockets.serve(handler, "0.0.0.0", 443, ssl=ssl_context)
+async def main():
+    async with websockets.serve(handler, "0.0.0.0", 443, ssl=ssl_context):
+        print("WSS server running on port 443...")
+        await asyncio.Future()  # Run forever
 
-asyncio.get_event_loop().run_until_complete(start_server)
-print("WSS server running on port 443...")
-asyncio.get_event_loop().run_forever()
+# Proper asyncio entry point
+if __name__ == "__main__":
+    asyncio.run(main())
+
