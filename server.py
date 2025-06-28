@@ -1,32 +1,20 @@
 import asyncio
 import websockets
 
-# Path your clients will connect to
-PATH = "/ws/station"
-
 async def handler(websocket, path):
-    if path != PATH:
-        # Reject connections to other paths
-        await websocket.close(code=1008, reason="Invalid path")
-        return
-    
-    print(f"Client connected: {websocket.remote_address}")
-    try:
+    if path == "/ws/station":
         async for message in websocket:
-            print(f"Received: {message}")
-            response = f"Echo: {message}"
-            await websocket.send(response)
-    except websockets.exceptions.ConnectionClosed as e:
-        print(f"Connection closed: {e}")
+            print("Received:", message)
+            await websocket.send("Echo: " + message)
+    else:
+        # Close connection if path does not match
+        await websocket.close(code=1008, reason="Invalid path")
 
-async def main():
-    # Listen only on localhost because nginx reverse proxy will forward external requests
-    async with websockets.serve(handler, "127.0.0.1", 5000):
-        print("WebSocket server listening on ws://127.0.0.1:5000")
-        await asyncio.Future()  # run forever
+start_server = websockets.serve(handler, "localhost", 5000)
 
-if __name__ == "__main__":
-    asyncio.run(main())
+asyncio.get_event_loop().run_until_complete(start_server)
+print("WebSocket server running on ws://localhost:5000/ws/station")
+asyncio.get_event_loop().run_forever()
 
 # import asyncio
 # import ssl
