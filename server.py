@@ -1,45 +1,30 @@
 import asyncio
 import websockets
 
-async def handler(websocket):
-    print(f"New connection from {websocket.remote_address}")
+async def station_handler(websocket):
+    print(f"New station connection from {websocket.remote_address}")
     try:
         async for message in websocket:
-            print(f"Received: {message}")
-            await websocket.send(f"Echo: {message}")
+            print(f"Station received: {message}")
+            await websocket.send(f"Echo station: {message}")
     except websockets.exceptions.ConnectionClosed:
-        print("Client disconnected")
+        print("Station client disconnected")
+
+async def user_handler(websocket):
+    print(f"New user connection from {websocket.remote_address}")
+    try:
+        async for message in websocket:
+            print(f"User received: {message}")
+            await websocket.send(f"Echo user: {message}")
+    except websockets.exceptions.ConnectionClosed:
+        print("User client disconnected")
 
 async def main():
-    async with websockets.serve(handler, "127.0.0.1", 8765):
-        print("WebSocket server running on ws://127.0.0.1:8765")
-        await asyncio.Future()  # run forever
+    station_server = websockets.serve(station_handler, "127.0.0.1", 8765)
+    user_server = websockets.serve(user_handler, "127.0.0.1", 8766)
+    
+    await asyncio.gather(station_server, user_server)
+    print("Both WebSocket servers running on ports 8765 and 8766")
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-# import asyncio
-# import ssl
-# import websockets
-
-# ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-# ssl_context.load_cert_chain(
-#     certfile="/etc/letsencrypt/live/seismologos.shop/fullchain.pem",
-#     keyfile="/etc/letsencrypt/live/seismologos.shop/privkey.pem"
-# )
-
-# async def handler(websocket):
-#     print("Client connected")
-#     async for message in websocket:
-#         print(f"Received: {message}")
-#         await websocket.send("Echo: " + message)
-
-# async def main():
-#     async with websockets.serve(handler, "0.0.0.0", 443, ssl=ssl_context):
-#         print("WSS server running on port 443...")
-#         await asyncio.Future()  # Run forever
-
-# # Proper asyncio entry point
-# if __name__ == "__main__":
-#     asyncio.run(main())
-
