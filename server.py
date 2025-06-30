@@ -23,8 +23,9 @@ async def main():
     station_server = websockets.serve(station_handler, "127.0.0.1", 8765)
     user_server = websockets.serve(user_handler, "127.0.0.1", 8766)
     
-    await asyncio.gather(station_server, user_server)
-    print("Both WebSocket servers running on ports 8765 and 8766")
+    async with station_server, user_server:
+        print("Both WebSocket servers running on ports 8765 and 8766")
+        await asyncio.Future()  
 
 if __name__ == "__main__":
     asyncio.run(main())
