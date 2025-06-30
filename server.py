@@ -51,7 +51,7 @@ async def user_handler(websocket):
         watchdog_task.cancel()
 
 async def main():
-    station_server = websockets.serve(station_handler, "127.0.0.1", 8765)
+    station_server = websockets.serve(station_handler, "127.0.0.1", 8765, ping_interval=None)
     user_server = websockets.serve(user_handler, "127.0.0.1", 8766, ping_interval=20, ping_timeout=10)
     
     async with station_server, user_server:
