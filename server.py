@@ -3,20 +3,25 @@ import websockets
 
 async def station_handler(websocket):
     print(f"New station connection from {websocket.remote_address}", flush=True)
-    
+
     async def watchdog():
         try:
             await websocket.wait_closed()
         finally:
             print(f"Station connection closed (finally) {websocket.remote_address}", flush=True)
-    
+
     watchdog_task = asyncio.create_task(watchdog())
-    
+
     try:
-        async for message in websocket:
-            # You can uncomment to debug message content:
-            # print(f"Station received: {message}", flush=True)
-            await websocket.send(f"Echo station: {message}")
+        while True:
+            try:
+                message = await asyncio.wait_for(websocket.recv(), timeout=3.0)
+                # print(f"Station received: {message}", flush=True)
+                await websocket.send(f"Echo station: {message}")
+            except asyncio.TimeoutError:
+                print(f"Inactivity timeout. Closing connection {websocket.remote_address}", flush=True)
+                await websocket.close(code=1000, reason="Inactivity timeout")
+                break
     except websockets.exceptions.ConnectionClosedOK:
         print("Station client disconnected cleanly", flush=True)
     except websockets.exceptions.ConnectionClosedError as e:
@@ -25,7 +30,7 @@ async def station_handler(websocket):
         print(f"Unexpected error in station handler: {e}", flush=True)
     finally:
         watchdog_task.cancel()
-
+        
 async def user_handler(websocket):
     print(f"New user connection from {websocket.remote_address}", flush=True)
     
