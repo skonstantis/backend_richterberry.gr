@@ -29,7 +29,7 @@ async def user_handler(websocket):
 
 async def main():
     station_server = websockets.serve(station_handler, "127.0.0.1", 8765)
-    user_server = websockets.serve(user_handler, "127.0.0.1", 8766)
+    user_server = websockets.serve(user_handler, "127.0.0.1", 8766, ping_interval=20, ping_timeout=10)
     
     async with station_server, user_server:
         print("Both WebSocket servers running on ports 8765 and 8766", flush=True)
