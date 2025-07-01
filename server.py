@@ -4,21 +4,25 @@ from datetime import datetime, timedelta, timezone
 from collections import deque
 import json
 import time
+import signal
 
-BUFFER_DURATION_SECONDS = 30  
-data_buffer = deque()  
+BUFFER_DURATION_SECONDS = 30
+
+data_buffer = deque()
 buffer_lock = asyncio.Lock()
 
 connected_users = set()
 connected_users_lock = asyncio.Lock()
 broadcast_queue = asyncio.Queue()
 
-virtual_time_base = None  
-last_gps_sync_wallclock = None  
+virtual_time_base = None
+last_gps_sync_monotonic = None  
+
+shutdown_event = asyncio.Event()
 
 async def safe_send(ws, message):
     try:
-        await asyncio.wait_for(ws.send(message), timeout=1)
+        await asyncio.wait_for(ws.send(message), timeout=0.1)
     except Exception as e:
         print(f"Client send failed: {ws.remote_address} ({e})", flush=True)
         async with connected_users_lock:
@@ -29,13 +33,13 @@ async def safe_send(ws, message):
             print(f"Error closing socket for {ws.remote_address}: {close_err}", flush=True)
 
 async def virtual_clock_loop():
-    global virtual_time_base, last_gps_sync_wallclock
+    global virtual_time_base, last_gps_sync_monotonic
 
-    while True:
+    while not shutdown_event.is_set():
         await asyncio.sleep(1)
 
-        if virtual_time_base and last_gps_sync_wallclock:
-            virtual_time_now = virtual_time_base + timedelta(seconds=(time.time() - last_gps_sync_wallclock))
+        if virtual_time_base and last_gps_sync_monotonic is not None:
+            virtual_time_now = virtual_time_base + timedelta(seconds=(time.monotonic() - last_gps_sync_monotonic))
             cutoff_ts = (virtual_time_now - timedelta(seconds=BUFFER_DURATION_SECONDS)).timestamp()
 
             async with buffer_lock:
@@ -50,9 +54,9 @@ async def virtual_clock_loop():
                     print("[BUFFER] Empty", flush=True)
 
 async def broadcaster():
-    global virtual_time_base, last_gps_sync_wallclock
+    global virtual_time_base, last_gps_sync_monotonic
 
-    while True:
+    while not shutdown_event.is_set():
         raw_message = await broadcast_queue.get()
 
         try:
@@ -67,10 +71,16 @@ async def broadcaster():
 
         if gps_synced and sample_rate > 0 and len(samples) > 0:
             duration = len(samples) / sample_rate
-            virtual_time_base = timestamp_start + timedelta(seconds=duration)
-            last_gps_sync_wallclock = time.time()
+            new_virtual_time = timestamp_start + timedelta(seconds=duration)
 
-        if not (virtual_time_base and last_gps_sync_wallclock):
+            if virtual_time_base and new_virtual_time < virtual_time_base:
+                print(f"[INFO] GPS time moved backward: {virtual_time_base} → {new_virtual_time}", flush=True)
+
+            virtual_time_base = new_virtual_time
+            last_gps_sync_monotonic = time.monotonic()
+            print(f"[GPS SYNC] virtual_time_base={virtual_time_base}, monotonic={last_gps_sync_monotonic}", flush=True)
+
+        if not (virtual_time_base and last_gps_sync_monotonic is not None):
             print("[WARNING] No GPS sync yet; dropping data", flush=True)
             continue
 
@@ -94,9 +104,11 @@ async def broadcaster():
         message_to_send = json.dumps(packet_to_send)
 
         coros = [safe_send(ws, message_to_send) for ws in users_copy]
+        results = await asyncio.gather(*coros, return_exceptions=True)
 
-
-        await asyncio.gather(*coros, return_exceptions=True)
+        for ws, result in zip(users_copy, results):
+            if isinstance(result, Exception):
+                print(f"[ERROR] Broadcast to {ws.remote_address} failed: {result}", flush=True)
 
 async def station_handler(websocket):
     print(f"New station connection from {websocket.remote_address}", flush=True)
@@ -158,13 +170,30 @@ async def user_handler(websocket):
         async with connected_users_lock:
             connected_users.discard(websocket)
 
+def handle_shutdown_signal():
+    print("Shutting down...", flush=True)
+    shutdown_event.set()
+
 async def main():
-    station_server = websockets.serve(station_handler, "127.0.0.1", 8765, ping_interval=None)
+    signal.signal(signal.SIGINT, lambda s, f: handle_shutdown_signal())
+    signal.signal(signal.SIGTERM, lambda s, f: handle_shutdown_signal())
+
+    station_server = websockets.serve(station_handler, "127.0.0.1", 8765, ping_interval=30)
     user_server = websockets.serve(user_handler, "127.0.0.1", 8766, ping_interval=20, ping_timeout=10)
 
     async with station_server, user_server:
         print("WebSocket servers running on ports 8765 (station) and 8766 (users)", flush=True)
-        await asyncio.gather(broadcaster(), virtual_clock_loop())
+
+        broadcaster_task = asyncio.create_task(broadcaster())
+        clock_task = asyncio.create_task(virtual_clock_loop())
+
+        await shutdown_event.wait()
+
+        print("Cancelling tasks...", flush=True)
+        broadcaster_task.cancel()
+        clock_task.cancel()
+        await asyncio.gather(broadcaster_task, clock_task, return_exceptions=True)
+        print("Shutdown complete.", flush=True)
 
 if __name__ == "__main__":
     asyncio.run(main())
