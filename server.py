@@ -1,33 +1,62 @@
 import asyncio
 import websockets
+from datetime import datetime, timedelta, timezone
+from collections import deque
+import json
+
+BUFFER_DURATION_SECONDS = 30  
+data_buffer = deque()  
+buffer_lock = asyncio.Lock()
 
 connected_users = set()
 connected_users_lock = asyncio.Lock()
 broadcast_queue = asyncio.Queue()
 
+async def safe_send(ws, message):
+    try:
+        await asyncio.wait_for(ws.send(message), timeout=0.1)
+    except Exception as e:
+        print(f"Client send failed: {ws.remote_address} ({e})", flush=True)
+        async with connected_users_lock:
+            connected_users.discard(ws)
+        try:
+            await ws.close(code=1011, reason="Too slow to keep up")
+        except Exception as close_err:
+            print(f"Error closing socket for {ws.remote_address}: {close_err}", flush=True)
+
 
 async def broadcaster():
     while True:
-        message = await broadcast_queue.get()
+        raw_message = await broadcast_queue.get()
+
+        try:
+            packet = json.loads(raw_message)
+            timestamp_start = datetime.fromisoformat(packet["timestamp_start"].replace("Z", "+00:00")).astimezone(timezone.utc)
+            sample_rate = packet["sample_rate"]
+            samples = packet["samples"]
+        except Exception as e:
+            print(f"[ERROR] Invalid station packet: {e}", flush=True)
+            continue
+
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(seconds=BUFFER_DURATION_SECONDS)
+        new_samples = []
+
+        for i, value in enumerate(samples):
+            ts = timestamp_start + timedelta(seconds=i / sample_rate)
+            if ts >= cutoff:
+                new_samples.append((ts.timestamp(), value))
+
+        async with buffer_lock:
+            data_buffer.extend(new_samples)
+            while data_buffer and data_buffer[0][0] < cutoff.timestamp():
+                data_buffer.popleft()
+            print(f"[BUFFER] Size: {len(data_buffer)} samples", flush=True)
+
         async with connected_users_lock:
             users_copy = list(connected_users)
-        
-        coros = []
-        for user_ws in users_copy:
-            async def safe_send(ws=user_ws):
-                try:
-                    await asyncio.wait_for(ws.send(message), timeout=0.1)
-                except Exception as e:
-                    print(f"Client send failed: {ws.remote_address} ({e})", flush=True)
-                    async with connected_users_lock:
-                        connected_users.discard(ws)
-                    try:
-                        await ws.close(code=1011, reason="Too slow to keep up")
-                    except Exception as close_err:
-                        print(f"Error closing socket for {ws.remote_address}: {close_err}", flush=True)
 
-            coros.append(safe_send())
-
+        coros = [safe_send(ws, raw_message) for ws in users_copy]
         await asyncio.gather(*coros, return_exceptions=True)
 
 
