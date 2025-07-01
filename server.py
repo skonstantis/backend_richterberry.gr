@@ -3,6 +3,7 @@ import websockets
 from datetime import datetime, timedelta, timezone
 from collections import deque
 import json
+import time
 
 BUFFER_DURATION_SECONDS = 30  
 data_buffer = deque()  
@@ -11,6 +12,9 @@ buffer_lock = asyncio.Lock()
 connected_users = set()
 connected_users_lock = asyncio.Lock()
 broadcast_queue = asyncio.Queue()
+
+virtual_time_base = None  
+last_gps_sync_wallclock = None  
 
 async def safe_send(ws, message):
     try:
@@ -24,8 +28,30 @@ async def safe_send(ws, message):
         except Exception as close_err:
             print(f"Error closing socket for {ws.remote_address}: {close_err}", flush=True)
 
+async def virtual_clock_loop():
+    global virtual_time_base, last_gps_sync_wallclock
+
+    while True:
+        await asyncio.sleep(0.1)
+
+        if virtual_time_base and last_gps_sync_wallclock:
+            virtual_time_now = virtual_time_base + timedelta(seconds=(time.time() - last_gps_sync_wallclock))
+            cutoff_ts = (virtual_time_now - timedelta(seconds=BUFFER_DURATION_SECONDS)).timestamp()
+
+            async with buffer_lock:
+                while data_buffer and data_buffer[0][0] < cutoff_ts:
+                    data_buffer.popleft()
+
+                if data_buffer:
+                    print(f"[BUFFER] {len(data_buffer)} samples | "
+                          f"{datetime.utcfromtimestamp(data_buffer[0][0])} - "
+                          f"{datetime.utcfromtimestamp(data_buffer[-1][0])}", flush=True)
+                else:
+                    print("[BUFFER] Empty", flush=True)
 
 async def broadcaster():
+    global virtual_time_base, last_gps_sync_wallclock
+
     while True:
         raw_message = await broadcast_queue.get()
 
@@ -34,31 +60,33 @@ async def broadcaster():
             timestamp_start = datetime.fromisoformat(packet["timestamp_start"].replace("Z", "+00:00")).astimezone(timezone.utc)
             sample_rate = packet["sample_rate"]
             samples = packet["samples"]
+            gps_synced = packet.get("gps_synced", False)
         except Exception as e:
             print(f"[ERROR] Invalid station packet: {e}", flush=True)
             continue
 
-        now = datetime.now(timezone.utc)
-        cutoff = now - timedelta(seconds=BUFFER_DURATION_SECONDS)
-        new_samples = []
+        if gps_synced and sample_rate > 0 and len(samples) > 0:
+            duration = len(samples) / sample_rate
+            virtual_time_base = timestamp_start + timedelta(seconds=duration)
+            last_gps_sync_wallclock = time.time()
 
+        if not (virtual_time_base and last_gps_sync_wallclock):
+            print("[WARNING] No GPS sync yet; dropping data", flush=True)
+            continue
+
+        new_samples = []
         for i, value in enumerate(samples):
             ts = timestamp_start + timedelta(seconds=i / sample_rate)
-            if ts >= cutoff:
-                new_samples.append((ts.timestamp(), value))
+            new_samples.append((ts.timestamp(), value))
 
         async with buffer_lock:
             data_buffer.extend(new_samples)
-            while data_buffer and data_buffer[0][0] < cutoff.timestamp():
-                data_buffer.popleft()
-            print(f"[BUFFER] Size: {len(data_buffer)} samples", flush=True)
 
         async with connected_users_lock:
             users_copy = list(connected_users)
 
         coros = [safe_send(ws, raw_message) for ws in users_copy]
         await asyncio.gather(*coros, return_exceptions=True)
-
 
 async def station_handler(websocket):
     print(f"New station connection from {websocket.remote_address}", flush=True)
@@ -90,7 +118,6 @@ async def station_handler(websocket):
     finally:
         watchdog_task.cancel()
 
-
 async def user_handler(websocket):
     print(f"New user connection from {websocket.remote_address}", flush=True)
 
@@ -121,14 +148,13 @@ async def user_handler(websocket):
         async with connected_users_lock:
             connected_users.discard(websocket)
 
-
 async def main():
     station_server = websockets.serve(station_handler, "127.0.0.1", 8765, ping_interval=None)
     user_server = websockets.serve(user_handler, "127.0.0.1", 8766, ping_interval=20, ping_timeout=10)
 
     async with station_server, user_server:
         print("WebSocket servers running on ports 8765 (station) and 8766 (users)", flush=True)
-        await broadcaster() 
+        await asyncio.gather(broadcaster(), virtual_clock_loop())
 
 if __name__ == "__main__":
     asyncio.run(main())
