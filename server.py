@@ -18,7 +18,7 @@ last_gps_sync_wallclock = None
 
 async def safe_send(ws, message):
     try:
-        await asyncio.wait_for(ws.send(message), timeout=0.1)
+        await asyncio.wait_for(ws.send(message), timeout=1)
     except Exception as e:
         print(f"Client send failed: {ws.remote_address} ({e})", flush=True)
         async with connected_users_lock:
@@ -85,7 +85,17 @@ async def broadcaster():
         async with connected_users_lock:
             users_copy = list(connected_users)
 
-        coros = [safe_send(ws, raw_message) for ws in users_copy]
+        packet_to_send = packet.copy()
+        packet_to_send["samples"] = [
+            {"timestamp": ts, "value": value}
+            for ts, value in new_samples
+        ]
+
+        message_to_send = json.dumps(packet_to_send)
+
+        coros = [safe_send(ws, message_to_send) for ws in users_copy]
+
+
         await asyncio.gather(*coros, return_exceptions=True)
 
 async def station_handler(websocket):
