@@ -32,7 +32,7 @@ async def virtual_clock_loop():
     global virtual_time_base, last_gps_sync_wallclock
 
     while True:
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(1)
 
         if virtual_time_base and last_gps_sync_wallclock:
             virtual_time_now = virtual_time_base + timedelta(seconds=(time.time() - last_gps_sync_wallclock))
