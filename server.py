@@ -178,7 +178,7 @@ async def main():
     signal.signal(signal.SIGINT, lambda s, f: handle_shutdown_signal())
     signal.signal(signal.SIGTERM, lambda s, f: handle_shutdown_signal())
 
-    station_server = websockets.serve(station_handler, "127.0.0.1", 8765, ping_interval=30)
+    station_server = websockets.serve(station_handler, "127.0.0.1", 8765, ping_interval=None)
     user_server = websockets.serve(user_handler, "127.0.0.1", 8766, ping_interval=20, ping_timeout=10)
 
     async with station_server, user_server:
