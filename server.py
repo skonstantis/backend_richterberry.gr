@@ -5,6 +5,7 @@ from collections import deque
 import json
 import time
 import signal
+from aiohttp import web
 
 BUFFER_DURATION_SECONDS = 30
 
@@ -19,6 +20,17 @@ virtual_time_base = None
 last_gps_sync_monotonic = None
 
 shutdown_event = asyncio.Event()
+
+async def handle_buffer(request):
+    async with buffer_lock:
+        buffer_copy = list(data_buffer)
+
+    samples = [
+        {"timestamp": ts, "value": value}
+        for ts, value in buffer_copy
+    ]
+    return web.json_response({"samples": samples})
+
 
 async def safe_send(ws, message):
     try:
@@ -181,6 +193,14 @@ async def main():
     station_server = websockets.serve(station_handler, "127.0.0.1", 8765, ping_interval=None)
     user_server = websockets.serve(user_handler, "127.0.0.1", 8766, ping_interval=20, ping_timeout=10)
 
+    app = web.Application()
+    app.router.add_get("/buffer", handle_buffer)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    http_site = web.TCPSite(runner, "127.0.0.1", 8080)
+    await http_site.start()
+    
     async with station_server, user_server:
         print("WebSocket servers running on ports 8765 (station) and 8766 (users)", flush=True)
 
@@ -189,6 +209,9 @@ async def main():
 
         await shutdown_event.wait()
 
+        print("Shutting down HTTP server...", flush=True)
+        await runner.cleanup()
+        
         print("Cancelling tasks...", flush=True)
         broadcaster_task.cancel()
         clock_task.cancel()
