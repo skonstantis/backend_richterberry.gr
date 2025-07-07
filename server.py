@@ -6,7 +6,6 @@ import json
 import time
 import signal
 from aiohttp import web
-import aiohttp_cors
 
 BUFFER_DURATION_SECONDS = 30
 
@@ -185,27 +184,16 @@ def handle_shutdown_signal():
 async def main():
     signal.signal(signal.SIGINT, lambda s, f: handle_shutdown_signal())
     signal.signal(signal.SIGTERM, lambda s, f: handle_shutdown_signal())
-        
-    station_server = websockets.serve(station_handler, "0.0.0.0", 8765, ping_interval=None)
-    user_server = websockets.serve(user_handler, "0.0.0.0", 8766, ping_interval=20, ping_timeout=10)
+
+    station_server = websockets.serve(station_handler, "127.0.0.1", 8765, ping_interval=None)
+    user_server = websockets.serve(user_handler, "127.0.0.1", 8766, ping_interval=20, ping_timeout=10)
 
     app = web.Application()
     app.router.add_get("/buffer", get_buffer_handler)
     
-    cors = aiohttp_cors.setup(app, defaults={
-        "*": aiohttp_cors.ResourceOptions(
-            allow_credentials=True,
-            expose_headers="*",
-            allow_headers="*",
-        )
-    })
-
-    for route in list(app.router.routes()):
-        cors.add(route)
-    
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", 8080)
+    site = web.TCPSite(runner, "127.0.0.1", 8080)
     await site.start()
     print("HTTP server running on port 8080 (GET /buffer)", flush=True)
     
