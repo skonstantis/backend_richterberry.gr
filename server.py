@@ -5,45 +5,20 @@ from collections import deque
 import json
 import time
 import signal
-from aiohttp import web
 
 BUFFER_DURATION_SECONDS = 30
-SNAPSHOT_INTERVAL_SECONDS = 0.1  
 
 data_buffer = deque()
 buffer_lock = asyncio.Lock()
-
-snapshot_cache = ""
-snapshot_lock = asyncio.Lock()
 
 connected_users = set()
 connected_users_lock = asyncio.Lock()
 broadcast_queue = asyncio.Queue()
 
-virtual_time_lock = asyncio.Lock()
-
 virtual_time_base = None
-last_gps_sync_monotonic = None  
+last_gps_sync_monotonic = None
 
 shutdown_event = asyncio.Event()
-
-async def get_buffer_handler(request):
-    async with snapshot_lock:
-        snapshot = snapshot_cache
-    return web.Response(text=snapshot, content_type='application/json')
-
-async def snapshot_updater():
-    global snapshot_cache
-    while not shutdown_event.is_set():
-        async with buffer_lock:
-            buffer_data = [
-                {"timestamp": ts, "value": value}
-                for ts, value in data_buffer
-            ]
-        snapshot_json = json.dumps(buffer_data)
-        async with snapshot_lock:
-            snapshot_cache = snapshot_json
-        await asyncio.sleep(SNAPSHOT_INTERVAL_SECONDS)
 
 async def safe_send(ws, message):
     try:
@@ -63,21 +38,20 @@ async def virtual_clock_loop():
     while not shutdown_event.is_set():
         await asyncio.sleep(1)
 
-    async with virtual_time_lock:
-            if virtual_time_base and last_gps_sync_monotonic is not None:
-                virtual_time_now = virtual_time_base + timedelta(seconds=(time.monotonic() - last_gps_sync_monotonic))
-                cutoff_ts = (virtual_time_now - timedelta(seconds=BUFFER_DURATION_SECONDS)).timestamp()
+        if virtual_time_base and last_gps_sync_monotonic is not None:
+            virtual_time_now = virtual_time_base + timedelta(seconds=(time.monotonic() - last_gps_sync_monotonic))
+            cutoff_ts = (virtual_time_now - timedelta(seconds=BUFFER_DURATION_SECONDS)).timestamp()
 
-                async with buffer_lock:
-                    while data_buffer and data_buffer[0][0] < cutoff_ts:
-                        data_buffer.popleft()
+            async with buffer_lock:
+                while data_buffer and data_buffer[0][0] < cutoff_ts:
+                    data_buffer.popleft()
 
-                    if data_buffer:
-                        print(f"[BUFFER] {len(data_buffer)} samples | "
-                            f"{datetime.utcfromtimestamp(data_buffer[0][0])} - "
-                            f"{datetime.utcfromtimestamp(data_buffer[-1][0])}", flush=True)
-                    else:
-                        print("[BUFFER] Empty", flush=True)
+            if data_buffer:
+                print(f"[BUFFER] {len(data_buffer)} samples | "
+                      f"{datetime.utcfromtimestamp(data_buffer[0][0])} - "
+                      f"{datetime.utcfromtimestamp(data_buffer[-1][0])}", flush=True)
+            else:
+                print("[BUFFER] Empty", flush=True)
 
 async def broadcaster():
     global virtual_time_base, last_gps_sync_monotonic
@@ -99,10 +73,16 @@ async def broadcaster():
             duration = len(samples) / sample_rate
             new_virtual_time = timestamp_start + timedelta(seconds=duration)
 
-            async with virtual_time_lock:
-                virtual_time_base = new_virtual_time
-                last_gps_sync_monotonic = time.monotonic()
-                print(f"[GPS SYNC] virtual_time_base={virtual_time_base}, monotonic={last_gps_sync_monotonic}", flush=True)
+            if virtual_time_base and new_virtual_time < virtual_time_base:
+                print(f"[INFO] GPS time moved backward: {virtual_time_base} → {new_virtual_time}", flush=True)
+
+            virtual_time_base = new_virtual_time
+            last_gps_sync_monotonic = time.monotonic()
+            print(f"[GPS SYNC] virtual_time_base={virtual_time_base}, monotonic={last_gps_sync_monotonic}", flush=True)
+
+        if not (virtual_time_base and last_gps_sync_monotonic is not None):
+            print("[WARNING] No GPS sync yet; dropping data", flush=True)
+            continue
 
         new_samples = []
         for i, value in enumerate(samples):
@@ -201,29 +181,18 @@ async def main():
     station_server = websockets.serve(station_handler, "127.0.0.1", 8765, ping_interval=None)
     user_server = websockets.serve(user_handler, "127.0.0.1", 8766, ping_interval=20, ping_timeout=10)
 
-    app = web.Application()
-    app.router.add_get("/buffer", get_buffer_handler)
-    
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", 8080)
-    await site.start()
-    print("HTTP server running on port 8080 (GET /buffer)", flush=True)
-    
     async with station_server, user_server:
         print("WebSocket servers running on ports 8765 (station) and 8766 (users)", flush=True)
 
-        snapshot_task = asyncio.create_task(snapshot_updater())
         broadcaster_task = asyncio.create_task(broadcaster())
         clock_task = asyncio.create_task(virtual_clock_loop())
 
         await shutdown_event.wait()
 
         print("Cancelling tasks...", flush=True)
-        snapshot_task.cancel()
         broadcaster_task.cancel()
         clock_task.cancel()
-        await asyncio.gather(snapshot_task, broadcaster_task, clock_task, return_exceptions=True)
+        await asyncio.gather(broadcaster_task, clock_task, return_exceptions=True)
         print("Shutdown complete.", flush=True)
 
 if __name__ == "__main__":
