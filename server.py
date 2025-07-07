@@ -8,10 +8,13 @@ import signal
 from aiohttp import web
 
 BUFFER_DURATION_SECONDS = 30
-
+SNAPSHOT_INTERVAL_SECONDS = 0.1  
 
 data_buffer = deque()
 buffer_lock = asyncio.Lock()
+
+snapshot_cache = ""
+snapshot_lock = asyncio.Lock()
 
 connected_users = set()
 connected_users_lock = asyncio.Lock()
@@ -25,12 +28,22 @@ last_gps_sync_monotonic = None
 shutdown_event = asyncio.Event()
 
 async def get_buffer_handler(request):
-    async with buffer_lock:
-        buffer_data = [
-            {"timestamp": ts, "value": value}
-            for ts, value in data_buffer
-        ]
-    return web.json_response(buffer_data)
+    async with snapshot_lock:
+        snapshot = snapshot_cache
+    return web.Response(text=snapshot, content_type='application/json')
+
+async def snapshot_updater():
+    global snapshot_cache
+    while not shutdown_event.is_set():
+        async with buffer_lock:
+            buffer_data = [
+                {"timestamp": ts, "value": value}
+                for ts, value in data_buffer
+            ]
+        snapshot_json = json.dumps(buffer_data)
+        async with snapshot_lock:
+            snapshot_cache = snapshot_json
+        await asyncio.sleep(SNAPSHOT_INTERVAL_SECONDS)
 
 async def safe_send(ws, message):
     try:
@@ -200,15 +213,17 @@ async def main():
     async with station_server, user_server:
         print("WebSocket servers running on ports 8765 (station) and 8766 (users)", flush=True)
 
+        snapshot_task = asyncio.create_task(snapshot_updater())
         broadcaster_task = asyncio.create_task(broadcaster())
         clock_task = asyncio.create_task(virtual_clock_loop())
 
         await shutdown_event.wait()
 
         print("Cancelling tasks...", flush=True)
+        snapshot_task.cancel()
         broadcaster_task.cancel()
         clock_task.cancel()
-        await asyncio.gather(broadcaster_task, clock_task, return_exceptions=True)
+        await asyncio.gather(snapshot_task, broadcaster_task, clock_task, return_exceptions=True)
         print("Shutdown complete.", flush=True)
 
 if __name__ == "__main__":
