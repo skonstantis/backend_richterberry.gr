@@ -7,10 +7,14 @@ import time
 import signal
 from aiohttp import web
 
-BUFFER_DURATION_SECONDS = 30
+BUFFER_250HZ_DURATION_SECONDS = 30
+BUFFER_50HZ_DURATION_SECONDS = 300
 
-data_buffer = deque()
-buffer_lock = asyncio.Lock()
+buffer_250hz = deque()
+buffer_50hz = deque()
+
+buffer_250hz_lock = asyncio.Lock()
+buffer_50hz_lock = asyncio.Lock()
 
 connected_users = set()
 connected_users_lock = asyncio.Lock()
@@ -21,9 +25,11 @@ last_gps_sync_monotonic = None
 
 shutdown_event = asyncio.Event()
 
-async def handle_buffer(request):
-    async with buffer_lock:
-        buffer_copy = list(data_buffer)
+# === HTTP HANDLERS ===
+
+async def handle_buffer_250hz(request):
+    async with buffer_250hz_lock:
+        buffer_copy = list(buffer_250hz)
 
     samples = [
         {"timestamp": ts, "value": value}
@@ -31,6 +37,17 @@ async def handle_buffer(request):
     ]
     return web.json_response({"samples": samples})
 
+async def handle_buffer_50hz(request):
+    async with buffer_50hz_lock:
+        buffer_copy = list(buffer_50hz)
+
+    samples = [
+        {"timestamp": ts, "value": value}
+        for ts, value in buffer_copy
+    ]
+    return web.json_response({"samples": samples})
+
+# === SAFE SEND ===
 
 async def safe_send(ws, message):
     try:
@@ -44,6 +61,8 @@ async def safe_send(ws, message):
         except Exception as close_err:
             print(f"Error closing socket for {ws.remote_address}: {close_err}", flush=True)
 
+# === VIRTUAL CLOCK LOOP ===
+
 async def virtual_clock_loop():
     global virtual_time_base, last_gps_sync_monotonic
 
@@ -52,18 +71,33 @@ async def virtual_clock_loop():
 
         if virtual_time_base and last_gps_sync_monotonic is not None:
             virtual_time_now = virtual_time_base + timedelta(seconds=(time.monotonic() - last_gps_sync_monotonic))
-            cutoff_ts = (virtual_time_now - timedelta(seconds=BUFFER_DURATION_SECONDS)).timestamp()
 
-            async with buffer_lock:
-                while data_buffer and data_buffer[0][0] < cutoff_ts:
-                    data_buffer.popleft()
+            cutoff_ts_250hz = (virtual_time_now - timedelta(seconds=BUFFER_250HZ_DURATION_SECONDS)).timestamp()
+            cutoff_ts_50hz = (virtual_time_now - timedelta(seconds=BUFFER_50HZ_DURATION_SECONDS)).timestamp()
 
-            if data_buffer:
-                print(f"[BUFFER] {len(data_buffer)} samples | "
-                      f"{datetime.utcfromtimestamp(data_buffer[0][0])} - "
-                      f"{datetime.utcfromtimestamp(data_buffer[-1][0])}", flush=True)
+            async with buffer_250hz_lock:
+                while buffer_250hz and buffer_250hz[0][0] < cutoff_ts_250hz:
+                    buffer_250hz.popleft()
+
+            async with buffer_50hz_lock:
+                while buffer_50hz and buffer_50hz[0][0] < cutoff_ts_50hz:
+                    buffer_50hz.popleft()
+
+            if buffer_250hz:
+                print(f"[BUFFER 250Hz] {len(buffer_250hz)} samples | "
+                      f"{datetime.utcfromtimestamp(buffer_250hz[0][0])} - "
+                      f"{datetime.utcfromtimestamp(buffer_250hz[-1][0])}", flush=True)
             else:
-                print("[BUFFER] Empty", flush=True)
+                print("[BUFFER 250Hz] Empty", flush=True)
+
+            if buffer_50hz:
+                print(f"[BUFFER  50Hz] {len(buffer_50hz)} samples | "
+                      f"{datetime.utcfromtimestamp(buffer_50hz[0][0])} - "
+                      f"{datetime.utcfromtimestamp(buffer_50hz[-1][0])}", flush=True)
+            else:
+                print("[BUFFER  50Hz] Empty", flush=True)
+
+# === BROADCASTER ===
 
 async def broadcaster():
     global virtual_time_base, last_gps_sync_monotonic
@@ -96,13 +130,22 @@ async def broadcaster():
             print("[WARNING] No GPS sync yet; dropping data", flush=True)
             continue
 
-        new_samples = []
+        new_samples_250hz = []
+        downsampled_50hz = []
+
         for i, value in enumerate(samples):
             ts = timestamp_start + timedelta(seconds=i / sample_rate)
-            new_samples.append((ts.timestamp(), value))
+            ts_float = ts.timestamp()
+            new_samples_250hz.append((ts_float, value))
 
-        async with buffer_lock:
-            data_buffer.extend(new_samples)
+            if i == 0 or i == len(samples) - 1 or i % 5 == 0:
+                downsampled_50hz.append((ts_float, value))
+
+        async with buffer_250hz_lock:
+            buffer_250hz.extend(new_samples_250hz)
+
+        async with buffer_50hz_lock:
+            buffer_50hz.extend(downsampled_50hz)
 
         async with connected_users_lock:
             users_copy = list(connected_users)
@@ -110,7 +153,7 @@ async def broadcaster():
         packet_to_send = packet.copy()
         packet_to_send["samples"] = [
             {"timestamp": ts, "value": value}
-            for ts, value in new_samples
+            for ts, value in new_samples_250hz
         ]
 
         message_to_send = json.dumps(packet_to_send)
@@ -121,6 +164,8 @@ async def broadcaster():
         for ws, result in zip(users_copy, results):
             if isinstance(result, Exception):
                 print(f"[ERROR] Broadcast to {ws.remote_address} failed: {result}", flush=True)
+
+# === WEBSOCKET HANDLERS ===
 
 async def station_handler(websocket):
     print(f"New station connection from {websocket.remote_address}", flush=True)
@@ -182,6 +227,8 @@ async def user_handler(websocket):
         async with connected_users_lock:
             connected_users.discard(websocket)
 
+# === MAIN ===
+
 def handle_shutdown_signal():
     print("Shutting down...", flush=True)
     shutdown_event.set()
@@ -194,13 +241,14 @@ async def main():
     user_server = websockets.serve(user_handler, "127.0.0.1", 8766, ping_interval=20, ping_timeout=10)
 
     app = web.Application()
-    app.router.add_get("/buffer", handle_buffer)
+    app.router.add_get("/buffer30", handle_buffer_250hz)
+    app.router.add_get("/buffer300", handle_buffer_50hz)
 
     runner = web.AppRunner(app)
     await runner.setup()
     http_site = web.TCPSite(runner, "127.0.0.1", 8080)
     await http_site.start()
-    
+
     async with station_server, user_server:
         print("WebSocket servers running on ports 8765 (station) and 8766 (users)", flush=True)
 
@@ -211,7 +259,7 @@ async def main():
 
         print("Shutting down HTTP server...", flush=True)
         await runner.cleanup()
-        
+
         print("Cancelling tasks...", flush=True)
         broadcaster_task.cancel()
         clock_task.cancel()
