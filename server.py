@@ -10,9 +10,6 @@ from aiohttp import web
 BUFFER_250HZ_DURATION_SECONDS = 30
 BUFFER_50HZ_DURATION_SECONDS = 300
 
-stations = [{"code": "000", "location": "Downtown Athens", "connected": False}]
-stations_lock = asyncio.Lock()
-
 buffer_250hz = deque()
 buffer_50hz = deque()
 
@@ -51,6 +48,7 @@ async def handle_buffer_50hz(request):
     return web.json_response({"samples": samples})
 
 # === SAFE SEND ===
+
 async def safe_send(ws, message):
     try:
         await asyncio.wait_for(ws.send(message), timeout=0.1)
@@ -64,6 +62,7 @@ async def safe_send(ws, message):
             print(f"Error closing socket for {ws.remote_address}: {close_err}", flush=True)
 
 # === VIRTUAL CLOCK LOOP ===
+
 async def virtual_clock_loop():
     global virtual_time_base, last_gps_sync_monotonic
 
@@ -99,6 +98,7 @@ async def virtual_clock_loop():
                 print("[BUFFER  50Hz] Empty", flush=True)
 
 # === BROADCASTER ===
+
 async def broadcaster():
     global virtual_time_base, last_gps_sync_monotonic
 
@@ -151,7 +151,6 @@ async def broadcaster():
             users_copy = list(connected_users)
 
         packet_to_send = packet.copy()
-        packet_to_send["type"] = "data"
         packet_to_send["samples"] = [
             {"timestamp": ts, "value": value}
             for ts, value in new_samples_250hz
@@ -167,28 +166,6 @@ async def broadcaster():
                 print(f"[ERROR] Broadcast to {ws.remote_address} failed: {result}", flush=True)
 
 # === WEBSOCKET HANDLERS ===
-async def update_station_connection(code, connected_bool):
-    async with stations_lock:
-        for station in stations:
-            if station["code"] == code:
-                if station["connected"] != connected_bool:
-                    station["connected"] = connected_bool
-                    print(f"Station {code} connection status updated to {connected_bool}")
-
-                    status_message = json.dumps({
-                        "type": "station_status",
-                        "station": {
-                            "code": code,
-                            "connected": connected_bool
-                        }
-                    })
-
-                    async with connected_users_lock:
-                        users_copy = list(connected_users)
-
-                    coros = [safe_send(ws, status_message) for ws in users_copy]
-                    await asyncio.gather(*coros, return_exceptions=True)
-                break
 
 async def station_handler(websocket):
     print(f"New station connection from {websocket.remote_address}", flush=True)
@@ -201,38 +178,23 @@ async def station_handler(websocket):
 
     watchdog_task = asyncio.create_task(watchdog())
 
-    station_code = None
-
     try:
         while True:
             try:
                 message = await asyncio.wait_for(websocket.recv(), timeout=3.0)
-                
-                data = json.loads(message)
-                station_code = data.get("station_id")
-                if station_code:
-                    await update_station_connection(station_code, True)
-                await broadcast_queue.put(message)
-                
                 await websocket.send("Echo station: OK")
-
+                await broadcast_queue.put(message)
             except asyncio.TimeoutError:
                 print(f"Inactivity timeout. Closing connection {websocket.remote_address}", flush=True)
                 await websocket.close(code=1000, reason="Inactivity timeout")
                 break
-
     except websockets.exceptions.ConnectionClosedOK:
         print("Station client disconnected cleanly", flush=True)
-
     except websockets.exceptions.ConnectionClosedError as e:
         print(f"Station client disconnected with error: {e}", flush=True)
-
     except Exception as e:
         print(f"Unexpected error in station handler: {e}", flush=True)
-
     finally:
-        if station_code:
-            await update_station_connection(station_code, False)
         watchdog_task.cancel()
 
 async def user_handler(websocket):
@@ -241,22 +203,6 @@ async def user_handler(websocket):
     async with connected_users_lock:
         connected_users.add(websocket)
 
-    async with stations_lock:
-        stations_copy = [station.copy() for station in stations]
-    
-    handshake_message = json.dumps({
-        "type": "handshake",
-        "stations": stations_copy
-    })
-    try:
-        await websocket.send(handshake_message)
-    except Exception as e:
-        print(f"Failed to send handshake to {websocket.remote_address}: {e}", flush=True)
-        async with connected_users_lock:
-            connected_users.discard(websocket)
-        await websocket.close()
-        return
-    
     async def watchdog():
         try:
             await websocket.wait_closed()
@@ -282,6 +228,7 @@ async def user_handler(websocket):
             connected_users.discard(websocket)
 
 # === MAIN ===
+
 def handle_shutdown_signal():
     print("Shutting down...", flush=True)
     shutdown_event.set()
