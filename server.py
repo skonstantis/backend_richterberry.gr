@@ -104,14 +104,13 @@ async def broadcaster():
 
     while not shutdown_event.is_set():
         raw_message = await broadcast_queue.get()
-        print(raw_message)
         try:
             packet = json.loads(raw_message)
             timestamp_start = datetime.fromisoformat(packet["timestamp_start"].replace("Z", "+00:00")).astimezone(timezone.utc)
             sample_rate = packet["sample_rate"]
             samples = packet["samples"]
             gps_synced = packet["gps_synced"]
-            station = packet["station_code"]
+            station = packet["station_id"]
         except Exception as e:
             print(f"[ERROR] Invalid station packet: {e}", flush=True)
             continue
