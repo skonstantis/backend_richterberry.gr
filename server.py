@@ -110,7 +110,8 @@ async def broadcaster():
             timestamp_start = datetime.fromisoformat(packet["timestamp_start"].replace("Z", "+00:00")).astimezone(timezone.utc)
             sample_rate = packet["sample_rate"]
             samples = packet["samples"]
-            gps_synced = packet.get("gps_synced", False)
+            gps_synced = packet["gps_synced"]
+            station = packet["station_code"]
         except Exception as e:
             print(f"[ERROR] Invalid station packet: {e}", flush=True)
             continue
@@ -151,6 +152,8 @@ async def broadcaster():
             users_copy = list(connected_users)
 
         packet_to_send = packet.copy()
+        packet_to_send["type"] = "data"
+        packet_to_send["station"] = station 
         packet_to_send["samples"] = [
             {"timestamp": ts, "value": value}
             for ts, value in new_samples_250hz
