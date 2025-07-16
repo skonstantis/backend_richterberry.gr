@@ -104,7 +104,7 @@ async def broadcaster():
 
     while not shutdown_event.is_set():
         raw_message = await broadcast_queue.get()
-
+        print(raw_message)
         try:
             packet = json.loads(raw_message)
             timestamp_start = datetime.fromisoformat(packet["timestamp_start"].replace("Z", "+00:00")).astimezone(timezone.utc)
