@@ -7,6 +7,8 @@ import time
 import signal
 from aiohttp import web
 
+# === CONFIG ===
+
 BUFFER_250HZ_DURATION_SECONDS = 30
 BUFFER_50HZ_DURATION_SECONDS = 300
 
@@ -17,7 +19,7 @@ stations = [
         "location": "Athens Central",
         "mode": "Testing",
         "type": "High-Resolution Real-Time Seismic Station",
-        "connected" : False
+        "connected": False
     },
     {
         "name": "gaia",
@@ -25,54 +27,72 @@ stations = [
         "location": "Thessaloniki",
         "mode": "Operational",
         "type": "Broadband Seismic Station",
-        "connected" : False
+        "connected": False
     },
 ]
+
 valid_station_ids = {s["id"] for s in stations}
 stations_lock = asyncio.Lock()
 
-buffer_250hz = deque()
-buffer_50hz = deque()
+# === PER-STATION STATE ===
 
-buffer_250hz_lock = asyncio.Lock()
-buffer_50hz_lock = asyncio.Lock()
+station_state = {}
 
-connected_users = set()
+for s in stations:
+    station_id = s["id"]
+    station_state[station_id] = {
+        "buffer_250hz": deque(),
+        "buffer_50hz": deque(),
+        "buffer_250hz_lock": asyncio.Lock(),
+        "buffer_50hz_lock": asyncio.Lock(),
+        "virtual_time_base": None,  
+        "last_gps_sync_monotonic": None,  
+    }
+
+# === CONNECTED USERS: ===
+
+connected_users = {}
 connected_users_lock = asyncio.Lock()
-broadcast_queue = asyncio.Queue()
 
-virtual_time_base = None
-last_gps_sync_monotonic = None
+broadcast_queue = asyncio.Queue()
 
 shutdown_event = asyncio.Event()
 
 # === HTTP HANDLERS ===
 
+async def handle_station_buffer(request):
+    station_name = request.match_info['station_name']
+    buffer_type = request.match_info['buffer_type']
+
+    # Find the station by name
+    station = next((s for s in stations if s["name"] == station_name), None)
+    if not station:
+        return web.json_response({"error": "Station not found"}, status=404)
+
+    station_id = station["id"]
+
+    if buffer_type == "30":
+        buffer_key = "buffer_250hz"
+    elif buffer_type == "300":
+        buffer_key = "buffer_50hz"
+    else:
+        return web.json_response({"error": "Invalid buffer type"}, status=400)
+
+    lock = station_state[station_id][buffer_key + "_lock"]
+    async with lock:
+        buffer_copy = list(station_state[station_id][buffer_key])
+
+    samples = [
+        {"timestamp": ts, "value": value}
+        for ts, value in buffer_copy
+    ]
+
+    return web.json_response({"samples": samples})
+
 async def handle_stations(request):
     async with stations_lock:
         stations_copy = list(stations)
     return web.json_response({"stations": stations_copy})
-
-
-async def handle_buffer_250hz(request):
-    async with buffer_250hz_lock:
-        buffer_copy = list(buffer_250hz)
-
-    samples = [
-        {"timestamp": ts, "value": value}
-        for ts, value in buffer_copy
-    ]
-    return web.json_response({"samples": samples})
-
-async def handle_buffer_50hz(request):
-    async with buffer_50hz_lock:
-        buffer_copy = list(buffer_50hz)
-
-    samples = [
-        {"timestamp": ts, "value": value}
-        for ts, value in buffer_copy
-    ]
-    return web.json_response({"samples": samples})
 
 # === SAFE SEND ===
 
@@ -82,7 +102,8 @@ async def safe_send(ws, message):
     except Exception as e:
         print(f"Client send failed: {ws.remote_address} ({e})", flush=True)
         async with connected_users_lock:
-            connected_users.discard(ws)
+            if ws in connected_users:
+                del connected_users[ws]
         try:
             await ws.close(code=1011, reason="Too slow to keep up")
         except Exception as close_err:
@@ -91,44 +112,31 @@ async def safe_send(ws, message):
 # === VIRTUAL CLOCK LOOP ===
 
 async def virtual_clock_loop():
-    global virtual_time_base, last_gps_sync_monotonic
-
     while not shutdown_event.is_set():
         await asyncio.sleep(1)
 
-        if virtual_time_base and last_gps_sync_monotonic is not None:
-            virtual_time_now = virtual_time_base + timedelta(seconds=(time.monotonic() - last_gps_sync_monotonic))
+        for station_id in valid_station_ids:
+            state = station_state[station_id]
+            vt_base = state["virtual_time_base"]
+            last_sync = state["last_gps_sync_monotonic"]
 
-            cutoff_ts_250hz = (virtual_time_now - timedelta(seconds=BUFFER_250HZ_DURATION_SECONDS)).timestamp()
-            cutoff_ts_50hz = (virtual_time_now - timedelta(seconds=BUFFER_50HZ_DURATION_SECONDS)).timestamp()
+            if vt_base and last_sync is not None:
+                virtual_time_now = vt_base + timedelta(seconds=(time.monotonic() - last_sync))
 
-            async with buffer_250hz_lock:
-                while buffer_250hz and buffer_250hz[0][0] < cutoff_ts_250hz:
-                    buffer_250hz.popleft()
+                cutoff_ts_250hz = (virtual_time_now - timedelta(seconds=BUFFER_250HZ_DURATION_SECONDS)).timestamp()
+                cutoff_ts_50hz = (virtual_time_now - timedelta(seconds=BUFFER_50HZ_DURATION_SECONDS)).timestamp()
 
-            async with buffer_50hz_lock:
-                while buffer_50hz and buffer_50hz[0][0] < cutoff_ts_50hz:
-                    buffer_50hz.popleft()
+                async with state["buffer_250hz_lock"]:
+                    while state["buffer_250hz"] and state["buffer_250hz"][0][0] < cutoff_ts_250hz:
+                        state["buffer_250hz"].popleft()
 
-            if buffer_250hz:
-                print(f"[BUFFER 250Hz] {len(buffer_250hz)} samples | "
-                      f"{datetime.utcfromtimestamp(buffer_250hz[0][0])} - "
-                      f"{datetime.utcfromtimestamp(buffer_250hz[-1][0])}", flush=True)
-            else:
-                print("[BUFFER 250Hz] Empty", flush=True)
-
-            if buffer_50hz:
-                print(f"[BUFFER  50Hz] {len(buffer_50hz)} samples | "
-                      f"{datetime.utcfromtimestamp(buffer_50hz[0][0])} - "
-                      f"{datetime.utcfromtimestamp(buffer_50hz[-1][0])}", flush=True)
-            else:
-                print("[BUFFER  50Hz] Empty", flush=True)
+                async with state["buffer_50hz_lock"]:
+                    while state["buffer_50hz"] and state["buffer_50hz"][0][0] < cutoff_ts_50hz:
+                        state["buffer_50hz"].popleft()
 
 # === BROADCASTER ===
 
 async def broadcaster():
-    global virtual_time_base, last_gps_sync_monotonic
-
     while not shutdown_event.is_set():
         raw_message = await broadcast_queue.get()
         try:
@@ -137,28 +145,30 @@ async def broadcaster():
             sample_rate = packet["sample_rate"]
             samples = packet["samples"]
             gps_synced = packet["gps_synced"]
-            station = packet["station_id"]
-            
-            if station not in valid_station_ids:
-                print(f"[WARNING] Unknown station_id '{station}' - discarding message", flush=True)
+            station_id = packet["station_id"]
+
+            if station_id not in valid_station_ids:
+                print(f"[WARNING] Unknown station_id '{station_id}' - discarding message", flush=True)
                 continue
         except Exception as e:
             print(f"[ERROR] Invalid station packet: {e}", flush=True)
             continue
 
+        state = station_state[station_id]
+
         if gps_synced and sample_rate > 0 and len(samples) > 0:
             duration = len(samples) / sample_rate
             new_virtual_time = timestamp_start + timedelta(seconds=duration)
 
-            if virtual_time_base and new_virtual_time < virtual_time_base:
-                print(f"[INFO] GPS time moved backward: {virtual_time_base} → {new_virtual_time}", flush=True)
+            vt_base = state["virtual_time_base"]
+            if vt_base and new_virtual_time < vt_base:
+                print(f"[INFO] GPS time moved backward for station {station_id}: {vt_base} → {new_virtual_time}", flush=True)
 
-            virtual_time_base = new_virtual_time
-            last_gps_sync_monotonic = time.monotonic()
-            print(f"[GPS SYNC] virtual_time_base={virtual_time_base}, monotonic={last_gps_sync_monotonic}", flush=True)
+            state["virtual_time_base"] = new_virtual_time
+            state["last_gps_sync_monotonic"] = time.monotonic()
 
-        if not (virtual_time_base and last_gps_sync_monotonic is not None):
-            print("[WARNING] No GPS sync yet; dropping data", flush=True)
+        if not (state["virtual_time_base"] and state["last_gps_sync_monotonic"] is not None):
+            print(f"[WARNING] No GPS sync yet for station {station_id}; dropping data", flush=True)
             continue
 
         new_samples_250hz = []
@@ -172,14 +182,11 @@ async def broadcaster():
             if i == 0 or i == len(samples) - 1 or i % 5 == 0:
                 downsampled_50hz.append((ts_float, value))
 
-        async with buffer_250hz_lock:
-            buffer_250hz.extend(new_samples_250hz)
+        async with state["buffer_250hz_lock"]:
+            state["buffer_250hz"].extend(new_samples_250hz)
 
-        async with buffer_50hz_lock:
-            buffer_50hz.extend(downsampled_50hz)
-
-        async with connected_users_lock:
-            users_copy = list(connected_users)
+        async with state["buffer_50hz_lock"]:
+            state["buffer_50hz"].extend(downsampled_50hz)
 
         packet_to_send = packet.copy()
         packet_to_send["type"] = "data"
@@ -190,12 +197,11 @@ async def broadcaster():
 
         message_to_send = json.dumps(packet_to_send)
 
-        coros = [safe_send(ws, message_to_send) for ws in users_copy]
-        results = await asyncio.gather(*coros, return_exceptions=True)
+        async with connected_users_lock:
+            users_copy = [(ws, sid) for ws, sid in connected_users.items()]
 
-        for ws, result in zip(users_copy, results):
-            if isinstance(result, Exception):
-                print(f"[ERROR] Broadcast to {ws.remote_address} failed: {result}", flush=True)
+        coros = [safe_send(ws, message_to_send) for ws, sid in users_copy if sid == station_id]
+        await asyncio.gather(*coros, return_exceptions=True)
 
 # === WEBSOCKET HANDLERS ===
 
@@ -221,18 +227,19 @@ async def station_handler(websocket):
                 station["connected"] = True
                 print(f"Station '{station_id}' marked as connected.", flush=True)
                 break
-            
+
     async def watchdog():
         try:
             await websocket.wait_closed()
         finally:
-            print(f"Station connection closed (finally) {websocket.remote_address}", flush=True)
+            print(f"Station connection closed {websocket.remote_address}", flush=True)
             async with stations_lock:
-                            for station in stations:
-                                if station["id"] == station_id:
-                                    station["connected"] = False
-                                    print(f"Station '{station_id}' marked as disconnected.", flush=True)
-                                    break
+                for station in stations:
+                    if station["id"] == station_id:
+                        station["connected"] = False
+                        print(f"Station '{station_id}' marked as disconnected.", flush=True)
+                        break
+
     watchdog_task = asyncio.create_task(watchdog())
 
     try:
@@ -247,45 +254,68 @@ async def station_handler(websocket):
                 break
     except websockets.exceptions.ConnectionClosedOK:
         print("Station client disconnected cleanly", flush=True)
-    except websockets.exceptions.ConnectionClosedError as e:
-        print(f"Station client disconnected with error: {e}", flush=True)
-    except Exception as e:
-        print(f"Unexpected error in station handler: {e}", flush=True)
     finally:
         watchdog_task.cancel()
 
 async def user_handler(websocket):
     print(f"New user connection from {websocket.remote_address}", flush=True)
 
+    try:
+        init_message = await asyncio.wait_for(websocket.recv(), timeout=10.0)
+        packet = json.loads(init_message)
+        station_id = packet["station_id"]
+        if station_id not in valid_station_ids:
+            print(f"Invalid station_id '{station_id}' from user {websocket.remote_address}", flush=True)
+            await websocket.close(code=1008, reason="Invalid station_id")
+            return
+    except Exception as e:
+        print(f"Failed to get station_id from user: {e}", flush=True)
+        await websocket.close(code=1008, reason="Missing or invalid station_id")
+        return
+
     async with connected_users_lock:
-        connected_users.add(websocket)
+        connected_users[websocket] = station_id
+
+    # Send current virtual time of the station right after subscription
+    state = station_state[station_id]
+    vt_base = state["virtual_time_base"]
+    last_sync = state["last_gps_sync_monotonic"]
+
+    if vt_base and last_sync is not None:
+        virtual_time_now = vt_base + timedelta(seconds=(time.monotonic() - last_sync))
+        virtual_time_iso = virtual_time_now.isoformat()
+    else:
+        virtual_time_iso = None
+
+    try:
+        await websocket.send(json.dumps({
+            "type": "virtual_time",
+            "virtual_time": virtual_time_iso
+        }))
+    except Exception as e:
+        print(f"Failed to send virtual time to user {websocket.remote_address}: {e}", flush=True)
 
     async def watchdog():
         try:
             await websocket.wait_closed()
         finally:
-            print(f"User connection closed (finally) {websocket.remote_address}", flush=True)
+            print(f"User connection closed {websocket.remote_address}", flush=True)
             async with connected_users_lock:
-                connected_users.discard(websocket)
+                if websocket in connected_users:
+                    del connected_users[websocket]
 
     watchdog_task = asyncio.create_task(watchdog())
 
     try:
         async for message in websocket:
             await websocket.send(f"Echo user: {message}")
-    except websockets.exceptions.ConnectionClosedOK:
-        print("User client disconnected cleanly", flush=True)
-    except websockets.exceptions.ConnectionClosedError as e:
-        print(f"User client disconnected with error: {e}", flush=True)
-    except Exception as e:
-        print(f"Unexpected error in user handler: {e}", flush=True)
     finally:
         watchdog_task.cancel()
         async with connected_users_lock:
-            connected_users.discard(websocket)
+            if websocket in connected_users:
+                del connected_users[websocket]
 
 # === MAIN ===
-
 def handle_shutdown_signal():
     print("Shutting down...", flush=True)
     shutdown_event.set()
@@ -298,9 +328,9 @@ async def main():
     user_server = websockets.serve(user_handler, "127.0.0.1", 8766, ping_interval=20, ping_timeout=10)
 
     app = web.Application()
-    app.router.add_get("/buffer30", handle_buffer_250hz)
-    app.router.add_get("/buffer300", handle_buffer_50hz)
     app.router.add_get("/stations", handle_stations)
+
+    app.router.add_get("/{station_name}{buffer_type}", handle_station_buffer)
 
     runner = web.AppRunner(app)
     await runner.setup()
@@ -308,21 +338,17 @@ async def main():
     await http_site.start()
 
     async with station_server, user_server:
-        print("WebSocket servers running on ports 8765 (station) and 8766 (users)", flush=True)
+        print("Servers running on ports 8765 (stations WS), 8766 (users WS), 8080 (HTTP)", flush=True)
 
         broadcaster_task = asyncio.create_task(broadcaster())
         clock_task = asyncio.create_task(virtual_clock_loop())
 
         await shutdown_event.wait()
 
-        print("Shutting down HTTP server...", flush=True)
         await runner.cleanup()
-
-        print("Cancelling tasks...", flush=True)
         broadcaster_task.cancel()
         clock_task.cancel()
         await asyncio.gather(broadcaster_task, clock_task, return_exceptions=True)
-        print("Shutdown complete.", flush=True)
 
 if __name__ == "__main__":
     asyncio.run(main())
