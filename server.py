@@ -32,7 +32,6 @@ stations = [
 ]
 
 valid_station_ids = {s["id"] for s in stations}
-valid_station_names = {s["name"] for s in stations}
 stations_lock = asyncio.Lock()
 
 # === PER-STATION STATE ===
@@ -204,14 +203,6 @@ async def broadcaster():
         coros = [safe_send(ws, message_to_send) for ws, sid in users_copy if sid == station_id]
         await asyncio.gather(*coros, return_exceptions=True)
 
-# === HELPER FUNCTION ===
-
-def get_station_id_by_name(name):
-    for s in stations:
-        if s["name"] == name:
-            return s["id"]
-    return None
-
 # === WEBSOCKET HANDLERS ===
 
 async def station_handler(websocket):
@@ -220,15 +211,14 @@ async def station_handler(websocket):
     try:
         init_message = await asyncio.wait_for(websocket.recv(), timeout=600.0)
         packet = json.loads(init_message)
-        station_name = packet.get("station_name")
-        station_id = get_station_id_by_name(station_name)
-        if not station_id:
-            print(f"Unknown station_name '{station_name}' from {websocket.remote_address}")
-            await websocket.close(code=1008, reason="Invalid station_name")
+        station_id = packet["station_id"]
+        if station_id not in valid_station_ids:
+            print(f"Unknown station_id '{station_id}' from {websocket.remote_address}", flush=True)
+            await websocket.close(code=1008, reason="Invalid station_id")
             return
     except Exception as e:
-        print(f"Failed to get station_name: {e}", flush=True)
-        await websocket.close(code=1008, reason="Missing or invalid station_name")
+        print(f"Failed to get station_id: {e}", flush=True)
+        await websocket.close(code=1008, reason="Missing or invalid station_id")
         return
 
     async with stations_lock:
@@ -273,15 +263,14 @@ async def user_handler(websocket):
     try:
         init_message = await asyncio.wait_for(websocket.recv(), timeout=10.0)
         packet = json.loads(init_message)
-        station_name = packet.get("station_name")
-        station_id = get_station_id_by_name(station_name)
-        if not station_id:
-            print(f"Invalid station_name '{station_name}' from user {websocket.remote_address}", flush=True)
-            await websocket.close(code=1008, reason="Invalid station_name")
+        station_id = packet["station_id"]
+        if station_id not in valid_station_ids:
+            print(f"Invalid station_id '{station_id}' from user {websocket.remote_address}", flush=True)
+            await websocket.close(code=1008, reason="Invalid station_id")
             return
     except Exception as e:
-        print(f"Failed to get station_name from user: {e}", flush=True)
-        await websocket.close(code=1008, reason="Missing or invalid station_name")
+        print(f"Failed to get station_id from user: {e}", flush=True)
+        await websocket.close(code=1008, reason="Missing or invalid station_id")
         return
 
     async with connected_users_lock:
