@@ -10,6 +10,27 @@ from aiohttp import web
 BUFFER_250HZ_DURATION_SECONDS = 30
 BUFFER_50HZ_DURATION_SECONDS = 300
 
+stations = [
+    {
+        "name": "prometheus",
+        "id": "GR000",
+        "location": "Athens Central",
+        "mode": "Testing",
+        "type": "High-Resolution Real-Time Seismic Station",
+        "connected" : False
+    },
+    {
+        "name": "gaia",
+        "id": "GR001",
+        "location": "Thessaloniki",
+        "mode": "Operational",
+        "type": "Broadband Seismic Station",
+        "connected" : False
+    },
+]
+valid_station_ids = {s["id"] for s in stations}
+stations_lock = asyncio.Lock()
+
 buffer_250hz = deque()
 buffer_50hz = deque()
 
@@ -26,6 +47,12 @@ last_gps_sync_monotonic = None
 shutdown_event = asyncio.Event()
 
 # === HTTP HANDLERS ===
+
+async def handle_stations(request):
+    async with stations_lock:
+        stations_copy = list(stations)
+    return web.json_response({"stations": stations_copy})
+
 
 async def handle_buffer_250hz(request):
     async with buffer_250hz_lock:
@@ -111,6 +138,10 @@ async def broadcaster():
             samples = packet["samples"]
             gps_synced = packet["gps_synced"]
             station = packet["station_id"]
+            
+            if station not in valid_station_ids:
+                print(f"[WARNING] Unknown station_id '{station}' - discarding message", flush=True)
+                continue
         except Exception as e:
             print(f"[ERROR] Invalid station packet: {e}", flush=True)
             continue
@@ -152,7 +183,6 @@ async def broadcaster():
 
         packet_to_send = packet.copy()
         packet_to_send["type"] = "data"
-        packet_to_send["station"] = station 
         packet_to_send["samples"] = [
             {"timestamp": ts, "value": value}
             for ts, value in new_samples_250hz
@@ -172,12 +202,37 @@ async def broadcaster():
 async def station_handler(websocket):
     print(f"New station connection from {websocket.remote_address}", flush=True)
 
+    try:
+        init_message = await asyncio.wait_for(websocket.recv(), timeout=600.0)
+        packet = json.loads(init_message)
+        station_id = packet["station_id"]
+        if station_id not in valid_station_ids:
+            print(f"Unknown station_id '{station_id}' from {websocket.remote_address}", flush=True)
+            await websocket.close(code=1008, reason="Invalid station_id")
+            return
+    except Exception as e:
+        print(f"Failed to get station_id: {e}", flush=True)
+        await websocket.close(code=1008, reason="Missing or invalid station_id")
+        return
+
+    async with stations_lock:
+        for station in stations:
+            if station["id"] == station_id:
+                station["connected"] = True
+                print(f"Station '{station_id}' marked as connected.", flush=True)
+                break
+            
     async def watchdog():
         try:
             await websocket.wait_closed()
         finally:
             print(f"Station connection closed (finally) {websocket.remote_address}", flush=True)
-
+            async with stations_lock:
+                            for station in stations:
+                                if station["id"] == station_id:
+                                    station["connected"] = False
+                                    print(f"Station '{station_id}' marked as disconnected.", flush=True)
+                                    break
     watchdog_task = asyncio.create_task(watchdog())
 
     try:
@@ -245,6 +300,7 @@ async def main():
     app = web.Application()
     app.router.add_get("/buffer30", handle_buffer_250hz)
     app.router.add_get("/buffer300", handle_buffer_50hz)
+    app.router.add_get("/stations", handle_stations)
 
     runner = web.AppRunner(app)
     await runner.setup()
