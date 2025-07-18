@@ -31,8 +31,13 @@ stations = [
     },
 ]
 
-valid_station_ids = {s["id"] for s in stations}
-stations_lock = asyncio.Lock()
+# Create mappings for fast lookup without locking stations list every time
+station_name_to_id = {s["name"]: s["id"] for s in stations}
+station_id_to_name = {s["id"]: s["name"] for s in stations}
+
+valid_station_ids = set(station_id_to_name.keys())
+
+stations_lock = asyncio.Lock()  # For marking connected state
 
 # === PER-STATION STATE ===
 
@@ -45,11 +50,11 @@ for s in stations:
         "buffer_50hz": deque(),
         "buffer_250hz_lock": asyncio.Lock(),
         "buffer_50hz_lock": asyncio.Lock(),
-        "virtual_time_base": None,  
-        "last_gps_sync_monotonic": None,  
+        "virtual_time_base": None,
+        "last_gps_sync_monotonic": None,
     }
 
-# === CONNECTED USERS: ===
+# === CONNECTED USERS ===
 
 connected_users = {}
 connected_users_lock = asyncio.Lock()
@@ -64,12 +69,9 @@ async def handle_station_buffer(request):
     station_name = request.match_info['station_name']
     buffer_type = request.match_info['buffer_type']
 
-    # Find the station by name
-    station = next((s for s in stations if s["name"] == station_name), None)
-    if not station:
+    station_id = station_name_to_id.get(station_name)
+    if not station_id:
         return web.json_response({"error": "Station not found"}, status=404)
-
-    station_id = station["id"]
 
     if buffer_type == "30":
         buffer_key = "buffer_250hz"
@@ -90,9 +92,7 @@ async def handle_station_buffer(request):
     return web.json_response({"samples": samples})
 
 async def handle_stations(request):
-    async with stations_lock:
-        stations_copy = list(stations)
-    return web.json_response({"stations": stations_copy})
+    return web.json_response({"stations": list(stations)})
 
 # === SAFE SEND ===
 
@@ -211,14 +211,15 @@ async def station_handler(websocket):
     try:
         init_message = await asyncio.wait_for(websocket.recv(), timeout=600.0)
         packet = json.loads(init_message)
-        station_id = packet["station_id"]
-        if station_id not in valid_station_ids:
-            print(f"Unknown station_id '{station_id}' from {websocket.remote_address}", flush=True)
-            await websocket.close(code=1008, reason="Invalid station_id")
+        station_name = packet.get("station_name")
+        station_id = station_name_to_id.get(station_name)
+        if not station_id:
+            print(f"Unknown station_name '{station_name}' from {websocket.remote_address}", flush=True)
+            await websocket.close(code=1008, reason="Invalid station_name")
             return
     except Exception as e:
-        print(f"Failed to get station_id: {e}", flush=True)
-        await websocket.close(code=1008, reason="Missing or invalid station_id")
+        print(f"Failed to get station_name: {e}", flush=True)
+        await websocket.close(code=1008, reason="Missing or invalid station_name")
         return
 
     async with stations_lock:
@@ -261,94 +262,71 @@ async def user_handler(websocket):
     print(f"New user connection from {websocket.remote_address}", flush=True)
 
     try:
-        init_message = await asyncio.wait_for(websocket.recv(), timeout=10.0)
+        init_message = await asyncio.wait_for(websocket.recv(), timeout=600.0)
         packet = json.loads(init_message)
-        station_id = packet["station_id"]
-        if station_id not in valid_station_ids:
-            print(f"Invalid station_id '{station_id}' from user {websocket.remote_address}", flush=True)
-            await websocket.close(code=1008, reason="Invalid station_id")
+        station_name = packet.get("station_name")
+        station_id = station_name_to_id.get(station_name)
+        if not station_id:
+            print(f"Invalid station_name '{station_name}' from user {websocket.remote_address}", flush=True)
+            await websocket.close(code=1008, reason="Invalid station_name")
             return
     except Exception as e:
-        print(f"Failed to get station_id from user: {e}", flush=True)
-        await websocket.close(code=1008, reason="Missing or invalid station_id")
+        print(f"Failed to get station_name from user: {e}", flush=True)
+        await websocket.close(code=1008, reason="Missing or invalid station_name")
         return
 
     async with connected_users_lock:
         connected_users[websocket] = station_id
 
-    # Send current virtual time of the station right after subscription
-    state = station_state[station_id]
-    vt_base = state["virtual_time_base"]
-    last_sync = state["last_gps_sync_monotonic"]
-
-    if vt_base and last_sync is not None:
-        virtual_time_now = vt_base + timedelta(seconds=(time.monotonic() - last_sync))
-        virtual_time_iso = virtual_time_now.isoformat()
-    else:
-        virtual_time_iso = None
-
     try:
-        await websocket.send(json.dumps({
-            "type": "virtual_time",
-            "virtual_time": virtual_time_iso
-        }))
-    except Exception as e:
-        print(f"Failed to send virtual time to user {websocket.remote_address}: {e}", flush=True)
-
-    async def watchdog():
-        try:
-            await websocket.wait_closed()
-        finally:
-            print(f"User connection closed {websocket.remote_address}", flush=True)
-            async with connected_users_lock:
-                if websocket in connected_users:
-                    del connected_users[websocket]
-
-    watchdog_task = asyncio.create_task(watchdog())
-
-    try:
-        async for message in websocket:
-            await websocket.send(f"Echo user: {message}")
+        while True:
+            await asyncio.sleep(3600)  
+    except websockets.exceptions.ConnectionClosed:
+        pass
     finally:
-        watchdog_task.cancel()
         async with connected_users_lock:
             if websocket in connected_users:
                 del connected_users[websocket]
 
-# === MAIN ===
-def handle_shutdown_signal():
-    print("Shutting down...", flush=True)
+# === SHUTDOWN HANDLER ===
+
+def shutdown():
+    print("Shutdown signal received, stopping server...", flush=True)
     shutdown_event.set()
 
-async def main():
-    signal.signal(signal.SIGINT, lambda s, f: handle_shutdown_signal())
-    signal.signal(signal.SIGTERM, lambda s, f: handle_shutdown_signal())
+# === MAIN ===
 
-    station_server = websockets.serve(station_handler, "127.0.0.1", 8765, ping_interval=None)
-    user_server = websockets.serve(user_handler, "127.0.0.1", 8766, ping_interval=20, ping_timeout=10)
+async def main():
+    signal.signal(signal.SIGINT, lambda s, f: shutdown())
+    signal.signal(signal.SIGTERM, lambda s, f: shutdown())
 
     app = web.Application()
-    app.router.add_get("/stations", handle_stations)
-
-    app.router.add_get("/{station_name}{buffer_type}", handle_station_buffer)
+    app.router.add_get("/api/stations", handle_stations)
+    app.router.add_get("/api/stations/{station_name}/buffer/{buffer_type}", handle_station_buffer)
 
     runner = web.AppRunner(app)
     await runner.setup()
-    http_site = web.TCPSite(runner, "127.0.0.1", 8080)
-    await http_site.start()
+    site = web.TCPSite(runner, "0.0.0.0", 8000)
+    await site.start()
 
-    async with station_server, user_server:
-        print("Servers running on ports 8765 (stations WS), 8766 (users WS), 8080 (HTTP)", flush=True)
+    print("HTTP Server started on port 8000", flush=True)
 
-        broadcaster_task = asyncio.create_task(broadcaster())
-        clock_task = asyncio.create_task(virtual_clock_loop())
+    station_server = await websockets.serve(station_handler, "0.0.0.0", 8001, max_size=None)
+    user_server = await websockets.serve(user_handler, "0.0.0.0", 8002, max_size=None)
 
-        await shutdown_event.wait()
+    print("WebSocket Servers started on ports 8001 (stations) and 8002 (users)", flush=True)
 
-        await runner.cleanup()
-        broadcaster_task.cancel()
-        clock_task.cancel()
-        await asyncio.gather(broadcaster_task, clock_task, return_exceptions=True)
+    await asyncio.gather(
+        virtual_clock_loop(),
+        broadcaster(),
+        shutdown_event.wait()
+    )
+
+    await runner.cleanup()
+    station_server.close()
+    await station_server.wait_closed()
+    user_server.close()
+    await user_server.wait_closed()
 
 if __name__ == "__main__":
     asyncio.run(main())
