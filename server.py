@@ -329,9 +329,10 @@ async def main():
 
     app = web.Application()
     app.router.add_get("/stations", handle_stations)
-
-    app.router.add_get("/{station_name}{buffer_type}", handle_station_buffer)
-
+    app.router.add_get(
+        r"/{station_name:[a-zA-Z0-9_-]+}{buffer_type:(30|300)}",
+        handle_station_buffer
+    )
     runner = web.AppRunner(app)
     await runner.setup()
     http_site = web.TCPSite(runner, "127.0.0.1", 8080)
