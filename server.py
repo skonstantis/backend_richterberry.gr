@@ -28,8 +28,17 @@ stations = [
         "mode": "Operational",
         "type": "Broadband Seismic Station",
         "connected": False
-    },
+    }
 ]
+
+dummy_station = {
+    "name": "dummy",
+    "id": "DUMMY",
+    "location": "N/A",
+    "mode": "Idle",
+    "type": "Dummy Station",
+    "connected": False,
+}
 
 valid_station_ids = {s["id"] for s in stations}
 station_name_to_id = {s["name"]: s["id"] for s in stations}
@@ -65,7 +74,6 @@ async def handle_station_buffer(request):
     station_name = request.match_info['station_name']
     buffer_type = request.match_info['buffer_type']
 
-    # Find the station by name
     station = next((s for s in stations if s["name"] == station_name), None)
     if not station:
         return web.json_response({"error": "Station not found"}, status=404)
@@ -278,13 +286,14 @@ async def user_handler(websocket):
 
         station_id = station_name_to_id.get(station_name)
         if not station_id or station_id not in valid_station_ids:
-            print(f"Invalid station_name '{station_name}' from user {websocket.remote_address}", flush=True)
-            await websocket.close(code=1008, reason="Invalid station_name")
-            return
+            dummy_station_id = "DUMMY"
+            station_id = dummy_station_id
+            print(f"Assigned dummy station_id '{station_id}' for unknown station_name '{station_name}' from user {websocket.remote_address}", flush=True)
     except Exception as e:
         print(f"Failed to get station_id from user: {e}", flush=True)
         await websocket.close(code=1008, reason="Missing or invalid station_id")
         return
+
 
     async with connected_users_lock:
         connected_users[websocket] = station_id
