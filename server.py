@@ -89,11 +89,6 @@ async def handle_station_buffer(request):
 
     return web.json_response({"samples": samples})
 
-async def handle_stations(request):
-    async with stations_lock:
-        stations_copy = list(stations)
-    return web.json_response({"stations": stations_copy})
-
 # === SAFE SEND ===
 
 async def safe_send(ws, message):
@@ -276,24 +271,15 @@ async def user_handler(websocket):
     async with connected_users_lock:
         connected_users[websocket] = station_id
 
-    # Send current virtual time of the station right after subscription
-    state = station_state[station_id]
-    vt_base = state["virtual_time_base"]
-    last_sync = state["last_gps_sync_monotonic"]
-
-    if vt_base and last_sync is not None:
-        virtual_time_now = vt_base + timedelta(seconds=(time.monotonic() - last_sync))
-        virtual_time_iso = virtual_time_now.isoformat()
-    else:
-        virtual_time_iso = None
-
+    async with stations_lock:
+        stations_copy = list(stations)  
     try:
         await websocket.send(json.dumps({
-            "type": "virtual_time",
-            "virtual_time": virtual_time_iso
+            "type": "stations",
+            "stations": stations_copy
         }))
     except Exception as e:
-        print(f"Failed to send virtual time to user {websocket.remote_address}: {e}", flush=True)
+        print(f"Failed to send stations list to user {websocket.remote_address}: {e}", flush=True)
 
     async def watchdog():
         try:
