@@ -314,7 +314,6 @@ async def main():
     user_server = websockets.serve(user_handler, "127.0.0.1", 8766, ping_interval=20, ping_timeout=10)
 
     app = web.Application()
-    app.router.add_get("/stations", handle_stations)
     app.router.add_get(
         r"/{station_name:[a-zA-Z0-9_-]+}{buffer_type:(30|300)}",
         handle_station_buffer
