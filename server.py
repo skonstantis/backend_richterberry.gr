@@ -265,7 +265,7 @@ async def station_handler(websocket):
     except websockets.exceptions.ConnectionClosedOK:
         print("Station client disconnected cleanly", flush=True)
     finally:
-        watchdog_task.cancel()
+        await watchdog_task
 
 async def user_handler(websocket):
     print(f"New user connection from {websocket.remote_address}", flush=True)
