@@ -32,6 +32,7 @@ stations = [
 ]
 
 valid_station_ids = {s["id"] for s in stations}
+station_name_to_id = {s["name"]: s["id"] for s in stations}
 stations_lock = asyncio.Lock()
 
 # === PER-STATION STATE ===
@@ -273,10 +274,12 @@ async def user_handler(websocket):
     try:
         init_message = await asyncio.wait_for(websocket.recv(), timeout=10.0)
         packet = json.loads(init_message)
-        station_id = packet["station_id"]
-        if station_id not in valid_station_ids:
-            print(f"Invalid station_id '{station_id}' from user {websocket.remote_address}", flush=True)
-            await websocket.close(code=1008, reason="Invalid station_id")
+        station_name = packet["station_name"]
+
+        station_id = station_name_to_id.get(station_name)
+        if not station_id or station_id not in valid_station_ids:
+            print(f"Invalid station_name '{station_name}' from user {websocket.remote_address}", flush=True)
+            await websocket.close(code=1008, reason="Invalid station_name")
             return
     except Exception as e:
         print(f"Failed to get station_id from user: {e}", flush=True)
