@@ -131,6 +131,18 @@ async def virtual_clock_loop():
 
 # === BROADCASTER ===
 
+async def broadcast_station_status(station_id: str, connected: bool):
+    async with connected_users_lock:
+        users_copy = list(connected_users.keys())
+    message = json.dumps({
+        "type": "station_status",
+        "station_id": station_id,
+        "connected": connected
+    })
+    coros = [safe_send(ws, message) for ws in users_copy]
+    await asyncio.gather(*coros, return_exceptions=True)
+
+
 async def broadcaster():
     while not shutdown_event.is_set():
         raw_message = await broadcast_queue.get()
@@ -222,6 +234,8 @@ async def station_handler(websocket):
                 station["connected"] = True
                 print(f"Station '{station_id}' marked as connected.", flush=True)
                 break
+    await broadcast_station_status(station_id, True)
+
 
     async def watchdog():
         try:
@@ -234,6 +248,7 @@ async def station_handler(websocket):
                         station["connected"] = False
                         print(f"Station '{station_id}' marked as disconnected.", flush=True)
                         break
+            await broadcast_station_status(station_id, False)
 
     watchdog_task = asyncio.create_task(watchdog())
 
