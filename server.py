@@ -25,7 +25,7 @@ stations = [
         "name": "gaia",
         "id": "GR001",
         "location": "Thessaloniki",
-        "mode": "Operational",
+        "mode": "Testing",
         "type": "Broadband Seismic Station",
         "connected": False
     }
@@ -64,7 +64,7 @@ for s in stations:
 connected_users = {}
 connected_users_lock = asyncio.Lock()
 
-broadcast_queue = asyncio.Queue()
+broadcast_queue = asyncio.Queue(maxsize=100)
 
 shutdown_event = asyncio.Event()
 
@@ -148,9 +148,8 @@ async def broadcast_station_status(station_id: str, connected: bool):
         "station_id": station_id,
         "connected": connected
     })
-    coros = [safe_send(ws, message) for ws in users_copy]
-    await asyncio.gather(*coros, return_exceptions=True)
-
+    for ws in users_copy:
+        asyncio.create_task(safe_send(ws, message))
 
 async def broadcaster():
     while not shutdown_event.is_set():
@@ -266,7 +265,17 @@ async def station_handler(websocket):
             try:
                 message = await asyncio.wait_for(websocket.recv(), timeout=3.0)
                 await websocket.send("Echo station: OK")
-                await broadcast_queue.put(message)
+
+                try:
+                    broadcast_queue.put_nowait(message)
+                except asyncio.QueueFull:
+                    try:
+                        _ = broadcast_queue.get_nowait()   
+                        await broadcast_queue.put(message) 
+                        print("[WARNING] Broadcast queue full — dropped oldest to make room")
+                    except asyncio.QueueEmpty:
+                        print("[WARNING] Queue full but nothing to drop?!")
+
             except asyncio.TimeoutError:
                 print(f"Inactivity timeout. Closing connection {websocket.remote_address}", flush=True)
                 await websocket.close(code=1000, reason="Inactivity timeout")
