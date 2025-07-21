@@ -272,6 +272,10 @@ async def station_handler(websocket):
         finally:
             print(f"Station connection closed {websocket.remote_address}", flush=True)
             async with stations_lock:
+                station_name = next((s["name"] for s in stations if s["id"] == station_id), None)
+                if station_name:
+                    async with stations_max_lock:
+                        stations_max[station_name] = 0
                 for station in stations:
                     if station["id"] == station_id:
                         station["connected"] = False
@@ -360,11 +364,6 @@ async def user_handler(websocket):
             async with connected_users_lock:
                 if websocket in connected_users:
                     del connected_users[websocket]
-
-            station_name = next((s["name"] for s in stations if s["id"] == station_id), None)
-            if station_name:
-                async with stations_max_lock:
-                    stations_max[station_name] = 0
             
     watchdog_task = asyncio.create_task(watchdog())
 
