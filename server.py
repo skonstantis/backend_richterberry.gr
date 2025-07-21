@@ -372,11 +372,7 @@ async def user_handler(websocket):
         async for message in websocket:
             await websocket.send(f"Echo user: {message}")
     finally:
-        watchdog_task.cancel()
-        try:
-            await watchdog_task
-        except asyncio.CancelledError:
-            pass
+        await watchdog_task
 
         async with connected_users_lock:
             if websocket in connected_users:
