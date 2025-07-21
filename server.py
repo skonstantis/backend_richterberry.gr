@@ -42,6 +42,7 @@ dummy_station = {
 
 valid_station_ids = {s["id"] for s in stations}
 station_name_to_id = {s["name"]: s["id"] for s in stations}
+station_max = {s["name"]: 0 for s in stations}
 stations_lock = asyncio.Lock()
 
 # === PER-STATION STATE ===
@@ -68,8 +69,28 @@ broadcast_queue = asyncio.Queue(maxsize=100)
 
 shutdown_event = asyncio.Event()
 
+station_max_lock = asyncio.Lock()
+
 # === HTTP HANDLERS ===
 
+async def send_station_max_periodically():
+    while not shutdown_event.is_set():
+        await asyncio.sleep(1) 
+
+        async with station_max_lock:  
+            highs_copy = station_max.copy()
+
+        message = json.dumps({
+            "type": "stations_max",
+            "station_max": highs_copy
+        })
+
+        async with connected_users_lock:
+            users_copy = list(connected_users.keys())
+
+        coros = [safe_send(ws, message) for ws in users_copy]
+        await asyncio.gather(*coros, return_exceptions=True)
+        
 async def handle_station_buffer(request):
     station_name = request.match_info['station_name']
     buffer_type = request.match_info['buffer_type']
@@ -259,12 +280,26 @@ async def station_handler(websocket):
             await broadcast_station_status(station_id, False)
 
     watchdog_task = asyncio.create_task(watchdog())
-
+            
     try:
         while True:
             try:
                 message = await asyncio.wait_for(websocket.recv(), timeout=3.0)
-                await websocket.send("Echo station: OK")
+                await websocket.send("Echo station: OK") 
+                
+                try:
+                    packet = json.loads(message)
+                    samples = packet.get("samples", [])
+                    station_id = packet.get("station_id")
+
+                    station_name = next((s["name"] for s in stations if s["id"] == station_id), None)
+
+                    if station_name and samples:
+                        async with station_max_lock:
+                            station_max[station_name] = max(samples)
+
+                except Exception as e:
+                    print(f"[WARN] Failed to update station_max: {e}")
 
                 try:
                     broadcast_queue.put_nowait(message)
@@ -326,6 +361,11 @@ async def user_handler(websocket):
                 if websocket in connected_users:
                     del connected_users[websocket]
 
+        station_name = next((s["name"] for s in stations if s["id"] == station_id), None)
+        if station_name:
+            async with station_max_lock:
+                station_max[station_name] = 0
+            
     watchdog_task = asyncio.create_task(watchdog())
 
     try:
@@ -333,6 +373,11 @@ async def user_handler(websocket):
             await websocket.send(f"Echo user: {message}")
     finally:
         watchdog_task.cancel()
+        try:
+            await watchdog_task
+        except asyncio.CancelledError:
+            pass
+
         async with connected_users_lock:
             if websocket in connected_users:
                 del connected_users[websocket]
@@ -364,13 +409,19 @@ async def main():
 
         broadcaster_task = asyncio.create_task(broadcaster())
         clock_task = asyncio.create_task(virtual_clock_loop())
+        highs_task = asyncio.create_task(send_station_max_periodically())
 
         await shutdown_event.wait()
-
         await runner.cleanup()
         broadcaster_task.cancel()
         clock_task.cancel()
+        highs_task.cancel()
+        try:
+            await highs_task
+        except asyncio.CancelledError:
+            pass
         await asyncio.gather(broadcaster_task, clock_task, return_exceptions=True)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
