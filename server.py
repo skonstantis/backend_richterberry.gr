@@ -19,7 +19,9 @@ stations = [
         "location": "Athens Central",
         "mode": "Testing",
         "type": "High-Resolution Real-Time Seismic Station",
-        "connected": False
+        "connected": False,
+        "pi": "Raspberry Pi 5",
+        "geophones": 1,
     },
     {
         "name": "gaia",
@@ -27,7 +29,9 @@ stations = [
         "location": "Thessaloniki",
         "mode": "Testing",
         "type": "Broadband Seismic Station",
-        "connected": False
+        "connected": False,
+        "pi": "Raspberry Pi 5",
+        "geophones": 1,
     }
 ]
 
@@ -38,6 +42,8 @@ dummy_station = {
     "mode": "Idle",
     "type": "Dummy Station",
     "connected": False,
+    "pi": "DUMMY",
+    "geophones": "DUMMY",
 }
 
 valid_station_ids = {s["id"] for s in stations}
